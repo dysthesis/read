@@ -1,0 +1,778 @@
+This short example is worth pondering a bit if you are learning Zig:
+```
+`fnf(comptimex:bool)if(x)u32elsebool{returnif(x)0elsefalse;}constprint =@import("std").debug.print;pubfnmain()void{print("{} {}", .{f(false), f(true)});}`
+```
+It is curious in three ways:
+* You can write arbitrary expressions in type position.
+* In functions, type expressions can use preceding`comptime`parameters.
+* Functions*must*specify the signature, there’s no type
+inference, no`-&gt; auto`. When a generic function is
+called, Zig first computes the signature. While doing so, it ignores
+function’s body. Afterwards, the compiler separately checks that the
+signature is correct for the call site, and that the body is correct
+for the signature.
+
+## [Rules to avoid common extended inline assembly mistakes](https://nullprogram.com/blog/2024/12/20/)
+December 20, 2024
+nullprogram.com/blog/2024/12/20/
+GCC and Clang inline assembly is an interface between high and low level
+programming languages. It is subtle and treacherous. Many are ensnared in
+its traps, usually unknowingly. As such, the`asm`keyword is essentially
+the`unsafe`keyword of C and C++. Nearly every inline assembly tutorial,
+including[the awful ibilio page](https://web.archive.org/web/20241216071150/https://www.ibiblio.org/gferg/ldp/GCC-Inline-Assembly-HOWTO.html)at the top of search engines for
+decades, propagate fundamental, serious mistakes, and*most examples are
+incorrect*. The dangerous part is that the examples*usually*produce the
+expected results! The situation is dire. This article isn’t a tutorial,
+but basic rules to avoid the most common mistakes, or to spot them in code
+review.
+**The focus is entirely*extended assembly*, and not*basic assembly***,
+which has different rules. The former is any inline assembly statement
+with constraints or clobbers. That is, there’s a colon`:`token between
+the`asm`parenthesis. Basic assembly is blunt and has fewer uses, mostly
+at the top level or in[“naked” functions](https://nullprogram.com/blog/2023/03/23/), making misuse less
+likely.
+### (1) Avoid inline assembly if possible
+Because it’s so treacherous, the first rule is to avoid it if at all
+possible. Modern compilers are loaded with intrinsics and built-ins that
+replace nearly all the old inline assembly use cases. They allow access to
+low level features from the high level language. No need to bridge the gap
+between low and high yourself when there’s an intrinsic.
+Compilers do not have built-ins for system calls, and occasionally[lack a
+useful intrinsic](https://nullprogram.com/blog/2024/01/28/). Other times you might be building[foundational
+infrastructure](https://github.com/skeeto/scratch/blob/fbd3260e/misc/buddy.c#L594-#L616). These remaining cases are mostly about interacting
+with external interfaces, not optimization nor performance.
+### (2) It should nearly always be volatile
+Falling right out of rule (1), the remaining inline assembly cases nearly
+always have side effects beyond output constraints. That includes memory
+accesses, and it certainly includes system calls. Because of this, inline
+assembly should usually have the`volatile`qualifier.
+This prevents compilers from eliding or re-ordering the assembly. As a
+special rule, inline assembly lacking output constraints is implicitly
+volatile. Despite this,*please use`volatile`anyway!*When I do not see`volatile`it’s likely a defect. Stopping to consider if it’s this special
+case slows understanding and impedes code review.
+Tutorials often use`\_\_volatile\_\_`. Do not do this. It is an ancient alias
+keyword to support pre-standard compilers lacking the`volatile`keyword.
+This is not your situation. When I see`\_\_volatile\_\_`it likely means you
+copy-pasted the inline assembly from somewhere without understanding it.
+It’s a red flag that draws my attention for even more careful review.
+Side note:`\_\_asm`or`\_\_asm\_\_`is fine, and even required in some cases
+(e.g.`-std=cXX`). I usually write it`asm`.
+### (3) It probably needs a memory clobber
+The`"memory"`clobber is orthogonal to`volatile`, each serving different
+purposes. It’s less often needed than`volatile`, but typical remaining
+inline assembly cases require it. If memory is accessed in any way while
+executing the assembly, you need a memory clobber. This includes most
+system calls, and definitely a generic`syscall`wrapper.
+```
+`asmvolatile(...:"memory");`
+```
+In code review, if you do not see a`"memory"`clobber, give it extra
+scrutiny. It’s probably missing. If it’s truly unnecessary, I suggest
+documenting such in a comment so that reviewers know the omission is
+considered and intentional.
+The constraint prevents compilers from re-ordering loads and stores around
+the assembly. It would be disastrous, for example, if a`write(2)`system
+call occurred before the program populated the output buffer! In this
+case,`volatile`would prevent followup`write(2)`from being optimized
+out while`"memory"`forces memory stores to occur before the system call.
+### (4) Never modify input constraints
+It’s easy not to modify inputs, so this is mostly about ignorance, but
+this rule is broken with shocking frequency. Most of the time you can get
+away with it, right up until certain configurations have a heisenbug. In
+most cases this can be fixed by changing an input into read-write output
+constraint with`"+"`:
+```
+`asmvolatile("..."::"r"(x):...);// beforeasmvolatile("...":"+r"(x):...);// after`
+```
+If you hadn’t been using`volatile`(in violation of rule 2) then now
+suddenly you’d need it because there’s an output constraint. This happens
+often.
+### (5) Never call functions from inline assembly
+Many things can go wrong because the semantics cannot be expressed using
+inline assembly constraints. The stack may not be aligned, and you’ll
+clobber the redzone. (Yes, there’s a`"redzone"`constraint, but its
+insufficient to actually make a function call.) Do not do it. Tutorials
+like to show it because it makes for a simple demonstration, but all those
+examples are littered with defects.
+System calls are fine. Basic assembly may call functions when used outside
+of non-naked functions. The`goto`qualifier, used correctly, allows jumps
+to be safely expressed to the compiler. Just don’t use`call`in extended
+assembly.
+### (6) Do not define absolute assembly labels
+That is, if you need to jump within your assembly block, such as for a
+loop, do not write a named label:
+```
+`myloop:
+...
+jz myloop`
+```
+Your inline assembly is part of a function, and that function may be
+cloned or inlined, in which case there will be*multiple copies of your
+assembly block*in the translation unit. The assembler will see duplicate
+label names and reject the program. Until that function is inlined,
+perhaps at a high optimization level, this will likely work as expected.
+On the plus side it’s a loud compile time error when it doesn’t work.
+In inline assembly you can have the compiler generate a unique label with`%=`, but my preferred solution is the[local labels](https://sourceware.org/binutils/docs/as/Symbol-Names.html)feature of the
+assembler:
+In this case the assembler generates unique labels, and the number`0`isn’t the literal label name.`0b`(“backward”) refers to the previous`0`label, and`0f`(“forward”) would refer to the next`0`label. Perfectly
+unambiguous.
+### Naturally occurring practice problems
+Now that you’ve made it this far, here’s an exercise for practice: Search
+online for “inline assembly tutorial” and count the defects you find by
+applying my 6 rules. You’ll likely find at least one per result that isn’t[official compiler documentation](https://gcc.gnu.org/onlinedocs/gcc/Extended-Asm.html). Besides tutorials and reviewing
+real programs, you could[ask an LLM to generate inline assembly](https://nullprogram.com/blog/2024/11/10/), as
+they’ve been been trained to produce these common defects.
+
+I was taking a shower this morning, and was pondering[yesterday’s problem](https://matklad.github.io/2025/05/19/profiling-challenge-results.html), where I*suspect*that I have an outdated version of[hotspot](https://github.com/KDAB/hotspot)Linux profiler, but I can’t just go and download a fresh
+release from GitHub, because hotspot is a KDE app, and I use NixOS.
+And NixOS isn’t a problem —it’s a solution.
+Linux on desktop is a rickety tower of competing libraries, protocols
+and standards, which is always in an Escheresque sort of perpetual
+motion, taking off but simultaneously falling, and the best way to
+enjoy it is to take a photo, a frozen snapshot in time.
+The underlying force there is the absence of one unified baseline set
+of APIs for writing desktop programs. There’s no single entity that
+can coordinate the API, in contrast to Windows and MacOS.
+But then, how can Linux exist? How does that square with “never break
+the user space?” I’ll let you ponder the question, but let me first
+tell you a story from a domain where I consider myself an expert.
+## [Better LSP Than Never](https://matklad.github.io/2025/05/19/profiling-challenge-results.html#Better-LSP-Than-Never)
+The past ten years saw a big shift in how we are writing software:
+baseline level of “interactive static analysis” became the norm, go
+to definition is universally available. The surprising fact here is
+that the shift occurred a decade too late!
+The shift was caused by Microsoft releasing its Language Server
+Protocol specification. But there’s little value in the protocol
+itself. Its implementation is[mediocre](https://matklad.github.io/2023/10/12/lsp-could-have-been-better.html), it was strictly worse than[the state of the art at that time](https://htmlpreview.github.io/?https://github.com/dart-lang/sdk/blob/8e6a02d899ef62ef5b8405518b36340e609198e2/pkg/analysis_server/doc/api.html), and its[governance is abysmal](https://github.com/microsoft/language-server-protocol/pull/2027#issuecomment-2822857896). The only great thing about LSP is that
+it exists!
+If you were anywhere near JetBrains a decade ago, it was blindingly
+obvious that the absence of broad availability of basic IDE features
+leaves a lot of the value on the table, and that the multi-process
+IPC architecture is the way to go (JetBrains did IPC for Rider). But
+it is also clear why JetBrains didn’t do LSP —why would they? While
+the right solution on the technical grounds, you aren’t going to get
+paid for being technically right. As sad as it is, some amount of[deadweight loss](https://en.wikipedia.org/wiki/Deadweight_loss)is needed to capture some of the value you are
+producing, and you need to be able to capture value to invest in
+things! So the world had to wait for Microsoft to pick up the slack
+here, when they decided to gobble up the entire developer ecosystem
+as an investment.
+There was a decade of opportunity for OSS to coordinate around an
+IDE protocol, but that didn’t happen, because OSS is bad at
+coordination.
+## [Why Linux?](https://matklad.github.io/2025/05/19/profiling-challenge-results.html#Why-Linux)
+But then, why and how does Linux exist? I think part of that is a
+rather unique governance structure, where there’s a centralized
+control over the API area and strong commitment to the public
+interfaces. But the bigger part is POSIX. The reason why we have
+Linux, and BSDs, and XNU is that they all provide the same baseline
+API, which was defined from the outside. The coordination problem
+was pre-solved, and what remained is just filling-in the
+implementation. But there was no one to coordinate Linux on desktop.
+
+I’ve written a number of stateful services starting with an event loop
+at the core:
+```
+`asyncforeventinevents\_incoming:awaitprocess(event)`
+```
+I had to refactor this loop later, every time. For an example, see the
+direct cause for the article, this[TigerBeetle PR](https://github.com/tigerbeetle/tigerbeetle/pull/2970). Let me write the refactoring down, so that I get
+it right from the get go next time!
+## [Scalar Select](https://matklad.github.io/2025/05/14/scalar-select-aniti-pattern.html#Scalar-Select)
+Let’s say I am implementing an LSP server for some programming
+language. There’s going to be three main sources of events:
+* file modifications from user typing code in or git operations,
+* requests from the client (“give me completions!”),
+* output from compilation jobs running in the background with error
+messages and such.
+The “obvious” event loop setup for this case looks like this:
+```
+`events\_incoming: Stream[Event] = merge(events\_file\_system,events\_compiler,events\_lsp,)asyncforeventinevents\_incoming:awaitprocess(event)`
+```
+Here,`merge`is an operator that takes a number of event
+streams, and merges them into one. This is a
+```
+`loop{select!{...}}`
+```
+written with higher-order functions.
+## [Key Observation](https://matklad.github.io/2025/05/14/scalar-select-aniti-pattern.html#Key-Observation)
+Crucially, event streams are external to the process and are driven
+by the outside IO. You don’t really know or have control over*when*the user is typing!
+And`process(event)`takes time. This means that when
+we’ve finished processing the current event, there might be several
+events “ready”, already sitting in the address space of our process.
+Our “scalar select” will pick an arbitrary one, and that might
+create a lot of overhead.
+## [Implications](https://matklad.github.io/2025/05/14/scalar-select-aniti-pattern.html#Implications)
+Here are some specific optimizations you can apply if you don’t
+ignore the fact that multiple events are available at the same time
+after the delay induced by processing the previous event.
+Prioritization
+The most obvious one, we can pick the order in which to process
+events. For the LSP example, if you have a code completion
+request, and a file modification request, you want to process
+file modification first. The rule-of-thumb priority is writes
+over reads over accepts (of new clients).
+Selective Backpressure
+As an extreme form of prioritization, you can decide to not
+process a particular kind of request at all, exerting
+backpressure against a specific input, while allowing other
+inputs to proceed.
+Elimination
+Often, a request can be dropped completely depending on
+subsequent events. For example, if there’s a file modification
+that completely replaces its text, all preceding changes can be
+safely dropped.
+Coalescing
+Finally, even if it is not possible to completely eliminate the
+request, often it is more efficient to process several requests
+at the same time. For example, if we have two incremental file
+modification events (like “insert`'hello'`at offset`92`”), it makes sense to union them into one large
+change first. An LSP server will kick off a job to compute
+diagnostics after applying modifications. But if we have two
+modifications, we want to apply them both before starting a
+single diagnostics job.
+## [Data Oriented All The Things](https://matklad.github.io/2025/05/14/scalar-select-aniti-pattern.html#Data-Oriented-All-The-Things)
+Once you see the problem (the hard part), the solution is as
+expected:**always be batching**, forget the singulars,[push the`for`s down](https://matklad.github.io/2023/11/15/push-ifs-up-and-fors-down.html), become multitude!
+In other words, we want to change our scalar select that gives us a
+single event at a time into a batched one, which gives all the
+events already received. Under low load, we’ll be getting singleton
+batches. But as the load increases, the batch size will grow,
+increasing our load sublinearly!
+So, something like this:
+```
+`events\_incoming: Stream[Event] = merge(events\_file\_system,events\_compiler,events\_lsp,)events\_incoming\_batched: Stream[List[Event]] =batch\_stream(events\_incoming)asyncforevent\_batchinevents\_incoming\_batched:batch:List[Event] = coalesce(event\_batch)foreventinbatch:awaitprocess(event)`
+```
+The secret sauce is the`batch\_stream`function which
+waits until at least one event is available, but pulls all available
+events:
+```
+`asyncdefbatch\_stream(stream: Stream[T]) -&gt; Stream[List[T]]:whileTrue:event: T =awaitstream.next()batch:List[T] = [event]whileevent := stream.next\_non\_blocking():batch.append(event)yieldbatch`
+```
+Always be batching when messag****es****passing!
+
+## [Tips for more effective fuzz testing with AFL++](https://nullprogram.com/blog/2025/02/05/)
+February 05, 2025
+nullprogram.com/blog/2025/02/05/
+Fuzz testing is incredibly effective for mechanically discovering software
+defects, yet remains underused and neglected. Pick any program that must
+gracefully accept complex input, written*in any language*, which has not
+yet been been fuzzed, and fuzz testing usually reveals at least one bug.
+At least one program currently installed on your own computer certainly
+qualifies. Perhaps even most of them.[Everything is broken](https://danluu.com/everything-is-broken/)and
+low-hanging fruit is everywhere. After fuzz testing \~1,000 projects[over
+the past six years](https://nullprogram.com/blog/2019/01/25/), I’ve accumulated tips for picking that fruit.
+The checklist format has worked well in the past ([1](https://nullprogram.com/blog/2024/12/20/),[2](https://nullprogram.com/blog/2023/01/08/)), so
+I’ll use it again. This article discusses[AFL++](https://aflplus.plus/)on source-available
+C and C++ targets, running on glibc-based Linux distributions, currently
+the*indisputable*best fuzzing platform for C and C++.
+My tips complement the official, upstream documentation, so consult them,
+too:
+Even if a program has been fuzz tested, applying the techniques in this
+article may reveal defects missed by previous fuzz testing.
+### (1) Configure sanitizers and assertions
+More assertions means more effective fuzzing, and sanitizers are a kind of
+automatically-inserted assertions. By default, fuzz with both Address
+Sanitizer (ASan) and Undefined Behavior Sanitizer (UBSan):
+```
+`$ afl-gcc-fast -g3 -fsanitize=address,undefined ...`
+```
+ASan’s default configuration is not ideal, and should be adjusted via the`ASAN\_OPTIONS`environment variable. If customized at all, AFL++ requires
+at least these options:
+```
+`export ASAN\_OPTIONS="abort\_on\_error=1:halt\_on\_error=1:symbolize=0"`
+```
+Except`symbolize=0`,[this*ought to be*the ASan default](https://nullprogram.com/blog/2022/06/26/). When
+debugging a discovered crash, you’ll want UBSan set up the same way so
+that it behaves under in a debugger. To improve fuzzing, make ASan even
+more sensitive to defects by detecting use-after-return bugs. It slows
+fuzzing slightly, but it’s well worth the cost:
+```
+`ASAN\_OPTIONS+=":detect\_stack\_use\_after\_return=1"`
+```
+By default ASan fills the first 4KiB of fresh allocations with a pattern,
+to help detect use-after-free bugs. That’s not nearly enough for fuzzing.
+Crank it up to completely fill virtually all allocations with a pattern:
+```
+`ASAN\_OPTIONS+=":max\_malloc\_fill\_size=$((1&lt;&lt;&lt;&lt;30))"`
+```
+In the default configuration, if a program allocates more than 4KiB with`malloc`then, say, uses`strlen`on the uninitialized memory, no bug will
+be detected. There’s almost certainly a zero somewhere after 4KiB. Until I
+noticed it, the 4KiB limit hid a number of bugs from my fuzz testing. Per
+(4), fulling filling allocations with a pattern better isolates tests when
+using persistent mode.
+When fuzzing C++ and linking GCC’s libstdc++, consider`-D\_GLIBCXX\_DEBUG`.
+ASan cannot “see” out-of-bounds accesses within a container’s capacity,
+and the extra assertions fill in the gaps. Mind that it changes the ABI,
+though fuzz testing will instantly highlight such mismatches.
+### (2) Prefer the persistent mode
+While AFL++ can fuzz many programs in-place without writing a single line
+of code (`afl-gcc`,`afl-clang`), prefer AFL++’s[persistent mode](https://github.com/AFLplusplus/AFLplusplus/blob/stable/instrumentation/README.persistent_mode.md)(`afl-gcc-fast`,`afl-clang-fast`). It’s typically an order of magnitude
+faster and worth the effort. Though it also has pitfalls (see (4), (5)). I
+keep a file on hand,`fuzztmpl.c`— the progenitor of all my fuzz testers:
+```
+`#include&lt;unistd.h&gt;\_\_AFL\_FUZZ\_INIT();intmain(void){\_\_AFL\_INIT();char\*src=0;unsignedchar\*buf=\_\_AFL\_FUZZ\_TESTCASE\_BUF;while(\_\_AFL\_LOOP(10000)){intlen=\_\_AFL\_FUZZ\_TESTCASE\_LEN;src=realloc(src,len);memcpy(src,buf,len);// ... send src to target ...}}`
+```
+I[`:r`](https://vimhelp.org/insert.txt.html#:read)this into my Vim buffer, then modify as needed. It’s a
+stripped and improved version of the official template, which itself has a
+serious flaw (see (5)). There are unstated constraints about the position
+of`buf`and`len`in the code, so if in doubt, refer to the original
+template.
+We’re well into the 21st century. Nobody is compiling software on 16-bit
+machines anymore. Don’t get hung up on the one translation unit (TU) per
+source file mindset. When fuzz testing, we need at most two TUs: One TU
+for instrumented code and one TU for uninstrumented code. In most cases
+the latter takes the form of a library (libc, libstdc++, etc.) and we
+don’t need to think about it.
+Fuzz testing typically requires only a subset of the program. Including
+just those sources straight in the template is both effective and simple.
+In my template I put includes just*above*`unistd.h`so that the header
+isn’t visible to the sources unless they include it themselves.
+```
+`#include"src/utils.c"#include"src/parser.c"#include&lt;unistd.h&gt;`
+```
+I know, if you’ve never seen this before it looks bonkers. This isn’t what
+they taught you in college. Trust me,[this simple technique](https://en.wikipedia.org/wiki/Unity_build)will
+save you a thousand lines of build configuration. Otherwise you’ll need to
+manage different object files between fuzz testing and otherwise.
+Perhaps more importantly, you can now fuzz test*any arbitrary function*in the program, including static functions! They’re all right there in the
+same TU. You’re not limited to public-facing interfaces. Perhaps you can
+skip (7) and test against a better internal interface. It also gives you
+direct access to static variables so that you can clear/reset them between
+tests, per (4).
+Programs are often not designed for fuzz testing, or testing generally,
+and it may be difficult to tease apart tightly-coupled components. Many of
+the programs I’ve fuzz tested look like this. This technique lets you take
+a hacksaw to the program and substitute troublesome symbols just for fuzz
+testing without modifying a single original source line. For example, if
+the source I’m testing contains a`main`function, I can remove it:
+```
+`#define main oldmain
+# include "src/utils.c"
+# include "src/parser.c"
+#undef main
+#include&lt;unistd.h&gt;`
+```
+Sure, better to improve the program so that such hacks are unnecessary,
+but most cases I’m fuzz testing as part of a drive-by review of some open
+source project. It allows me to quickly discover defects in the original,
+unmodified program, and produces simpler bug reports like, “Compile with
+ASan, open this 50-byte file, and then the program will crash.”
+### (4) Isolate fuzz tests from each other
+Tests should be unaffected by previous tests. This is challenging in
+persistent mode, sometimes even impractical. That means resetting all
+global state, even something like the internal`strtok`buffer if that
+function is used. Add fuzz testing to your list of reasons to eschew
+global variables.
+It’s mitigated by (1), but otherwise uninitialized heap memory may hold
+contents from previous tests, breaking isolation. Besides interference
+with fuzzing instrumentation, bugs found this way are wickedly difficult
+to reproduce.
+Don’t pass uninitialized memory into a test, e.g. an output parameter
+allocated on the stack. Zero-initialize or fill it with a pattern. If it
+accepts an arena, fill it with a pattern before each test.
+Typically you have little control over heap addresses, which likely varies
+across tests and depends on the behavior previous tests. If the program[depends on address values](https://nullprogram.com/blog/2025/01/19/#hash-hardening-bonus), this may affect the results and make
+reproduction difficult, so watch for that.
+### (5) Do not test directly on the fuzz test buffer
+Passing`buf`and`len`straight into the target is the most common
+mistake, especially when fuzzing better-designed C programs, and
+particularly because the official template encourages it.
+```
+`myprogram(buf,len);// BAD!`
+```
+While it’s a great sign the program doesn’t depend on null termination, it
+creates a subtle trap. The underlying buffer allocated by AFL++ is larger
+than`len`, and ASan will not detect read overflows on inputs! Instead
+pass a copy sized to fit, which is the purpose of`src`in my template.
+Adjust the type of`src`as needed.
+If the program expects null-terminated input then you’ll need to do this
+anyway in order to append the null byte. If it accepts an “owning” type
+like`std::string`, then it’s also already done on your behalf. With
+“non-owning” views like`std::string\_view`you’ll still want to your own
+size-fit copy.
+If you see a program’s checked in fuzz test using`buf`directly, make
+this change and see if anything new pops out. It’s worked for me on a
+number of occasions.
+### (6) Don’t bother freeing memory
+In general, avoid doing work irrelevant to the fuzz test. The official
+tips say to “use a simpler target” and “instrument just what you need,”
+and keeping destructors out of the tests helps in both cases. Unless the
+program is especially memory-hungry, you won’t run out of memory before
+AFL++ resets the target process.
+If not for (1), it also helps with isolation (4), as different tests are
+less likely contaminated with uninitialized memory from previous tests.
+As an exception, if you want your destructor included in the fuzz test,
+then use it in the test. Also, it’s easy to exhaust non-memory resources,
+particularly file descriptors, and you may need to[clean those up](https://man7.org/linux/man-pages/man2/close_range.2.html)in order to fuzz test reliably.
+Of course, if the target uses[arena allocation](https://nullprogram.com/blog/2023/09/27/)then none of this
+matters! It also makes for perfect isolation, as even addresses won’t vary
+between tests.
+### (7) Use a memory file descriptor to back named paths
+Many interfaces are, shall we say,*not so well-designed*and only accept
+input from a named file system path, insisting on opening and reading the
+file themselves. Testing such interfaces presents challenges, especially
+if you’re interested in parallel fuzzing. Fortunately there’s usually an
+easy out: Create a memory file descriptor and use its`/proc`name.
+```
+`intfd=memfd\_create("fuzz",0);assert(fd==3);while(...){// ...ftruncate(fd,0);pwrite(fd,buf,len,0);myprogram("/proc/self/fd/3");}`
+```
+With standard input as 0, output as 1, and error as 2, I’ve assumed the
+memory file descriptor will land on 3, which makes the test code a little
+simpler. If it’s not 3 then something’s probably gone wrong anyway, and
+aborting is the best option. If you don’t want to assume, use`snprintf`or whatever to construct the path name from`fd`.
+Using`pwrite`(instead of`write`) leaves the file description offset at
+the beginning of the file.
+Thanks to the memory file descriptor, fuzz test data doesn’t land in
+permanent storage, so less wear and tear on your SSD from the occasional
+flush. Because of`/proc`, the file is unique to the process despite the
+common path name, so no problems parallel fuzzing. No cleanup needed,
+either.
+If the program wants a file descriptor —i.e. it wants a socket because
+you’re fuzzing some internal function —pass the file descriptor directly:
+If it accepts a`FILE \*`, you*could*`fopen`the`/proc`path, but better
+to use`fdmemopen`to create a`FILE \*`on the object:
+```
+`myprogram(fdmemopen(buf,len,"rb"));`
+```
+Note how, per (6), we don’t need to bother with`fclose`because it’s not
+associated with a file descriptor.
+### (8) Configure the target for smaller buffers
+A common sight in[diseased programs](http://catb.org/jargon/html/C/C-Programmers-Disease.html)are “generous” fixed buffer
+sizes:
+```
+`#define MY\_MAX\_BUFFER\_LENGTH 65536voidexample(...){charpath[PATH\_MAX];// typically 4,096charbuf[MY\_MAX\_BUFFER\_LENGTH];// ...}`
+```
+These huge buffers tend to hide bugs. Turn those stones over! It takes a
+lot of fuzzing time to max them out and excite the unhappy paths —or the
+super-unhappy paths, overflows. Better if the fuzz test can reach worst
+case conditions quickly and explore the execution paths out of it.
+So when you see these, cut them way down, possibly using (3). Change 65536
+to, say, 16 and see what happens. If fuzzing finds a crash on the short
+buffer, typically extending the input to crash on the original buffer size
+is straightforward, e.g. repeat one of the bytes even more than it already
+repeats.
+### Conclusion and samples
+Hopefully something here will help you catch a defect that would have
+otherwise gone unnoticed. Even better, perhaps awareness of these fuzzing
+techniques will prevent the bug in the first place. Thanks to my template,
+some solid tooling, and the know-how in this article, I can whip up a fuzz
+test in a couple of minutes. But that ease means I discard it as just as
+casually, and so I don’t take time to capture and catalog most. If you’d
+like to see some samples,[I do have an old, short list](https://old.reddit.com/r/C_Programming/comments/15wouat/_/jx2ld4a/). Perhaps
+after another kiloproject of fuzz testing I’ll pick up more techniques.
+
+## [Lessons learned from my first dive into WebAssembly](https://nullprogram.com/blog/2025/04/04/)
+April 04, 2025
+nullprogram.com/blog/2025/04/04/
+It began as a[water sort puzzle](https://www.coolmathgames.com/blog/how-to-play-lipuzz-water-sort)solver, constructed similarly to[my British Square solver](https://nullprogram.com/blog/2020/10/19/). It was nearly playable, so I added a user
+interface[with SDL2](https://nullprogram.com/blog/2023/01/08/). My wife enjoyed it on her desktop, but wished
+to play on her phone. So then I needed to either rewrite it in JavaScript
+and hope the solver was still fast enough for real-time use, or figure out
+WebAssembly (Wasm). I succeeded, and now[my game runs in browsers](https://nullprogram.com/water-sort/)([source](https://github.com/skeeto/scratch/tree/master/water-sort)). Like[before](https://nullprogram.com/blog/2025/03/06/), next I ported[my pkg-config clone](https://nullprogram.com/blog/2023/01/18/)to the Wasm System Interface ([WASI](https://wasi.dev/)), whipped up a proof-of-concept UI,
+and[it too runs in browsers](https://skeeto.github.io/u-config/). Neither use a language runtime,
+resulting in little 8kB and 28kB Wasm binaries respectively. In this
+article I share my experiences and techniques.
+Wasm is a[specification](https://webassembly.github.io/spec/)defining an abstract stack machine with a
+Harvard architecture, and related formats. There are just four types, i32,
+i64, f32, and f64. It also has “linear” octet-addressable memory starting
+at zero, with no alignment restrictions on loads and stores. Address zero
+is a valid, writable address, which resurfaces some, old school, high
+level language challenges regarding null pointers. There are 32-bit and
+64-bit flavors, though the latter remains experimental. That suits me: I
+appreciate smaller pointers on 64-bit hosts, and I wish I could opt into
+more often (e.g. x32).
+As browser tech goes, they chose an apt name: WebAssembly is to the web as
+JavaScript is to Java.
+There are distinct components at play, and much of the online discussion
+doesn’t do a great job drawing lines between them:
+* Wasm module: A compiled and linked image —like ELF or PE —containing
+sections for code, types, globals, import table, export table, and so
+on. The export table lists the module’s entry points. It has an optional*start section*indicating which function initializes a loaded image.
+(In practice almost nobody actually uses the start section.) A Wasm
+module can only affect the outside world through imported functions.
+Wasm itself defines no external interfaces for Wasm programs, not even
+printing or logging.
+* Wasm runtime: Loads Wasm modules, linking import table entries into the
+module. Because Wasm modules include types, the runtime can type check
+this linkage at load time. With imports resolved, it executes the start
+function, if any, then executes zero or more of its entry points, which
+hopefully invokes import functions such a way as to produce useful
+results, or perhaps simply return useful outputs.
+* Wasm compiler: Converts a high-level language to low-level Wasm. In
+order to do so, it requires some kind of Application Binary Interface
+(ABI) to map the high-level language concepts onto the machine. This
+typically introduces additional execution elements, and it’s important
+that we distinguish them from the abstract machine’s execution elements.
+Clang is the only compiler we’ll be discussing in this article, though
+there are many. During compilation the*function indices*are yet
+unknown and so references will need to be patched in by a linker.
+* Wasm linker: Settles the shape of the Wasm module and links up the
+functions emitted by the compiler. LLVM comes with`wasm-ld`, and it
+goes hand-in-hand with Clang as a compiler.
+* Language runtime: Unless you’re hand-writing raw Wasm, your high-level
+language probably has a standard library with operating system
+interfaces. C standard library, POSIX interfaces, etc. This runtime
+likely maps onto some standardized set of imports, most likely the
+aforementioned WASI, which defines a set of POSIX-like functions that
+Wasm modules may import. Because I[think we could do better](https://nullprogram.com/blog/2023/02/11/),[as usual](https://nullprogram.com/blog/2023/02/15/)[around here](https://nullprogram.com/blog/2023/03/23/), in this article we’re going to
+eschew the language runtime and code directly against raw WASI. You
+still have[easy access hash tables and dynamic arrays](https://nullprogram.com/blog/2025/01/19/).
+A combination of compiler-linker-runtime is conventionally called a*toolchain*. However, because almost any Clang installation can target
+Wasm out-of-the-box, and we’re skipping the language runtime, you can
+compile any of programs discussed in this article, including my game, with
+nothing more than Clang (invoking`wasm-ld`implicitly). If you have a
+Wasm runtime, which includes your browser, you can run them, too! Though
+this article will mostly focus on WASI, and you’ll need a WASI-capable
+runtime to run those examples, which doesn’t include browsers (short of
+implementing the API with JavaScript).
+I wasn’t particularly happy with the Wasm runtimes I tried, so I cannot
+enthusiastically recommend one. I’d love if I could point to one and say,
+“Use the same Clang to compile the runtime that you’re using to compile
+Wasm!” Alas, I had issues compiling, the runtime was buggy, or WASI was
+incomplete. However,[wazero](https://wazero.io/)(Go) was the easiest for me to use and it
+worked well enough, so I will use it in examples:
+```
+`$ go install github.com/tetratelabs/wazero/cmd/wazero@latest`
+```
+The Wasm Binary Toolkit ([WABT](https://github.com/WebAssembly/wabt)) is good to have on hand when working
+with Wasm, particularly`wasm2wat`to inspect Wasm modules, sort of like`objdump`or`readelf`. It converts Wasm to the WebAssembly Text Format
+(WAT).
+Learning Wasm I had quite some difficultly finding information. Outside of
+the Wasm specification, which, despite its length, is merely a narrow
+slice of the ecosystem, important technical details are scattered all over
+the place. Some is only available as source code, some buried comments in
+GitHub issues, and some lost behind dead links as repositories have moved.
+Large parts of LLVM are undocumented beyond an mention of existence. WASI
+has no documentation in a web-friendly format —so I have nothing to link
+from here when I mention its system calls —just some IDL sources in a Git
+repository. An old[`wasi.h`](https://github.com/WebAssembly/wasi-libc/blob/e9524a09/libc-bottom-half/headers/public/wasi/api.h)was the most readable, complete
+source of truth I could find.
+Fortunately Wasm is old enough that[LLMs](https://nullprogram.com/blog/2024/11/10/)are well-versed in it, and
+simply asking questions, or for usage examples, was more effective than
+searching online. If you’re stumped on how to achieve something in the
+Wasm ecosystem, try asking a state-of-the-art LLM for help.
+### Example programs
+Let’s go over concrete examples to lay some foundations. Consider this
+simple C function:
+```
+`floatnorm(floatx,floaty){returnx\*x+y\*y;}`
+```
+To compile to Wasm (32-bit) with Clang, we use the`--target=wasm32`:
+```
+`$ clang -c --target=wasm32 -O example.c`
+```
+The object file`example.o`is in Wasm format, so WABT can examine it.
+Here’s the output of`wasm2wat -f`, where`-f`produces output in the
+“folded” format, which is how I prefer to read it.
+```
+`(module(type(;0;)(func(paramf32f32)(resultf32)))(import"env""\_\_linear\_memory"(memory(;0;)0))(func$norm(type0)(paramf32f32)(resultf32)(f32.add(f32.mul(local.get0)(local.get0))(f32.mul(local.get1)(local.get1)))))`
+```
+We can see[the ABI](https://github.com/WebAssembly/tool-conventions/blob/main/BasicCABI.md)taking shape: Clang has predictably mapped`float`into`f32`. It similarly maps`char`,`short`,`int`and`long`onto`i32`. In 64-bit Wasm, the Clang ABI is LP64 and maps`long`onto`i64`. There’s a also`$norm`function which takes two`f32`parameters
+and returns an`f32`.
+Getting a little more complex:
+```
+`\_\_attribute((import\_name("f")))voidf(int\*);\_\_attribute((export\_name("example")))voidexample(intx){f(&amp;x);}`
+```
+The`import\_name`function attribute indicates the module will not define
+it, even in another translation unit, and that it intends to import it.
+That is,`wasm-ld`will place it in the import table. The`export\_name`function attribute indicates it’s an entry point, and so`wasm-ld`will
+list it in the export table. Linking it will make things a little clearer:
+```
+`$ clang --target=wasm32 -nostdlib -Wl,--no-entry -O example.c`
+```
+The`-nostdlib`is because we won’t be using a language runtime, and`--no-entry`to tell the linker not to implicitly export a function
+(default:`\_start`) as an entry point. You might think this is connected
+with the Wasm*start function*, but`wasm-ld`does not support the*start
+section*at all! We’ll have use for an entry point later. The folded WAT:
+```
+`(module$a.out(type(;0;)(func(parami32)))(import"env""f"(func$f(type0)))(func$example(type0)(parami32)(locali32)(global.set$\_\_stack\_pointer(local.tee1(i32.sub(global.get$\_\_stack\_pointer)(i32.const16))))(i32.storeoffset=12(local.get1)(local.get0))(call$f(i32.add(local.get1)(i32.const12)))(global.set$\_\_stack\_pointer(i32.add(local.get1)(i32.const16))))(table(;0;)11funcref)(memory(;0;)2)(global$\_\_stack\_pointer(muti32)(i32.const66560))(export"memory"(memory0))(export"example"(func$example)))`
+```
+There’s a lot to unfold:
+* Pointers were mapped onto`i32`. Pointers are a high-level concept, and
+linear memory is addressed by an integral offset. This is typical of
+assembly after all.
+* There’s now a`\_\_stack\_pointer`, which is part of the Clang ABI, not
+Wasm. The Wasm abstract machine is a stack machine, but that stack
+doesn’t exist in linear memory. So you cannot take the address of values
+on the Wasm stack. There are lots of things C needs from a stack that
+Wasm doesn’t provide. So,*in addition to the Wasm stack*, Clang
+maintains another downward-growing stack in linear memory for these
+purposes, and the`\_\_stack\_pointer`global is the stack register of its
+ABI. We can see it’s allocated something like 64kB for the stack. (It’s
+a little more because program data is placed below the stack.)
+* It should be mostly readable without knowing Wasm: The function
+subtracts a 16-byte stack frame, stores a copy of the argument in it,
+then uses its memory offset for the first parameter to the import`f`.
+Why 16 bytes when it only needs 4? Because the stack is kept 16-byte
+aligned. Before returning, the function restores the stack pointer.
+As mentioned earlier, address zero is valid as far as the Wasm runtime is
+concerned, though dereferences are still undefined in C. This makes it
+more difficult to catch bugs. Given a null pointer this function would
+most likely read a zero at address zero and the program keeps running:
+In WAT:
+```
+`(func$get(type0)(parami32)(resulti32)(i32.load(local.get0)))`
+```
+Since the “hardware” won’t fault for us, ask Clang to do it instead:
+```
+`$ clang ... -fsanitize=undefined -fsanitize-trap ...`
+```
+Now in WAT:
+```
+`(module(type(;0;)(func(parami32)(resulti32)))(import"env""\_\_linear\_memory"(memory(;0;)0))(func$get(type0)(parami32)(resulti32)(block;; label = @1(block;; label = @2(br\_if0(;@2;)(i32.eqz(local.get0)))(br\_if1(;@1;)(i32.eqz(i32.and(local.get0)(i32.const3)))))(unreachable))(i32.load(local.get0))))`
+```
+Given a null pointer,`get`executes the`unreachable`instruction,
+causing the runtime to trap. In practice this is unrecoverable. Consider:
+nothing will restore`\_\_stack\_pointer`, and so the stack will “leak” the
+existing frames. (This can be worked around by exporting`\_\_stack\_pointer`and`\_\_stack\_high`via the`--export`linker flag, then restoring the
+stack pointer in the runtime after traps.)
+Wasm was extended with[bulk memory operations](https://github.com/WebAssembly/bulk-memory-operations), and so there are
+single instructions for`memset`and`memmove`, which Clang maps onto the
+built-ins:
+```
+`voidclear(void\*buf,longlen){\_\_builtin\_memset(buf,0,len);}`
+```
+([Below LLVM 20](https://releases.llvm.org/20.1.0/docs/ReleaseNotes.html#changes-to-the-webassembly-backend)you will need the undocumented`-mbulk-memory`option.) In WAT we see this as`memory.fill`:
+```
+`(module(type(;0;)(func(parami32i32)))(import"env""\_\_linear\_memory"(memory(;0;)0))(func$clear(type0)(parami32i32)(block;; label = @1(br\_if0(;@1;)(i32.eqz(local.get1)))(memory.fill(local.get0)(i32.const0)(local.get1)))))`
+```
+That’s great! I wish this worked so well outside of Wasm. It’s one reason[w64devkit](https://github.com/skeeto/w64devkit)has`-lmemory`, after all. Similarly`\_\_builtin\_trap()`maps
+onto the`unreachable`instruction, so we can reliably generate those as
+well.
+What about structures? They’re passed by address. Parameter structures go
+on the stack, then its address passed. To return a structure, a function
+accepts an implicit*out*parameter in which to write the return. This
+isn’t unusual, except that it’s challenging to manage across module
+boundaries, i.e. in imports and exports, because caller and callee are in
+different address spaces. It’s especially tricky to return a structure
+from an export, as the caller must somehow allocate space in the callee’s
+address space for the result. The[multi-value extension](https://github.com/WebAssembly/multi-value/blob/master/proposals/multi-value/Overview.md)solves this, but using it in C involves an ABI change, which is still
+experimental.
+### Water Sort Game
+Something you might not have expected: My water sort game imports no
+functions! It only exports three functions:
+```
+`voidgame\_init(i32seed);DrawList\*game\_render(i32width,i32height,i32mousex,i32mousey);voidgame\_update(i32input,i32mousex,i32mousey,i64now);`
+```
+The game uses[IMGUI-style](https://www.youtube.com/watch?v=DYWTw19_8r4)rendering. The caller passes in the
+inputs, and the game returns a kind of*display list*telling it what to
+draw. In the SDL version these turn into SDL renderer calls. In the web
+version, these turn into canvas draws, and “mouse” inputs may be touch
+events. It plays and feels the same on both platforms. Simple!
+I didn’t realize it at the time, but building the SDL version first was
+critical to my productivity.**Debugging Wasm programs is really dang
+hard!**Wasm tooling has yet to catch up with 1995, let alone 2025.
+Source-level debugging is still experimental and impractical. Developing
+applications on the Wasm platform. It’s about as ergonomic as[developing
+in MS-DOS](https://nullprogram.com/blog/2018/04/13/). Instead, develop on a platform much better suited for
+it, then*port*your application to Wasm after you’ve[got the issues
+worked out](https://nullprogram.com/blog/2025/02/05/). The less Wasm-specific code you write, the better, even
+if it means writing more code overall. Treat it as you would some weird
+embedded target.
+The game comes with 10,000 seeds. I generated \~200 million puzzles, sorted
+them by difficulty, and skimmed the top 10k most challenging. In the game
+they’re still sorted by increading difficulty, so it gets harder as you
+make progress.
+### Wasm System Interface
+WASI allows us to get a little more hands on. Let’s start with a Hello
+World program. A WASI application exports a traditional`\_start`entry
+point which returns nothing and takes no arguments. I’m also going to set
+up some basic typedefs:
+```
+`typedefunsignedcharu8;typedefsignedinti32;typedefsignedlonglongi64;typedefsignedlongiz;void\_start(void){}`
+```
+`wasm-ld`will automatically export this function, so we don’t need an`export\_name`attribute. This program successfully does nothing:
+```
+`$ clang --target=wasm32 -nostdlib -o hello.wasm hello.c
+$ wazero run hello.wasm &amp;&amp; echo ok
+ok`
+```
+To write output WASI defines`fd\_write()`:
+```
+`typedefstruct{u8\*buf;izlen;}IoVec;#define WASI(s) \_\_attribute((import\_module("wasi\_unstable"),import\_name(s)))WASI("fd\_write")i32fd\_write(i32,IoVec\*,iz,iz\*);`
+```
+Technically those`iz`variables are supposed to be`size\_t`, passed
+through Wasm as`i32`, but this is a foreign function, I know the ABI, and
+so[I can do as I please](https://nullprogram.com/blog/2023/05/31/). I absolutely love that WASI barely uses
+null-terminated strings, not even for paths, which is a breath of fresh
+air, but they still[marred the API with unsigned sizes](https://www.youtube.com/watch?v=wvtFGa6XJDU). Which I
+choose to ignore.
+This function is shaped like[POSIX`writev()`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/writev.html). I’ve also set it
+up for import, including a module name. The oldest, most stable version of
+WASI is called`wasi\_unstable`. (I suppose it shouldn’t be surprising that
+finding information in this ecosystem is difficult.)
+Every returning WASI function returns an`errno`value, with zero as
+success rather than some kind of[in-band signaling](https://nullprogram.com/blog/2016/09/23/). Hence the
+final out parameter unlike POSIX`writev()`.
+Armed with this function, let’s use it:
+```
+`void\_start(void){u8msg[]="hello world\\n";IoVeciov={msg,sizeof(msg)-1};izlen=0;fd\_write(1,&amp;iov,1,&amp;len);}`
+```
+Then:
+```
+`$ clang --target=wasm32 -nostdlib -o hello.wasm hello.c
+$ wazero run hello.wasm
+hello world`
+```
+Keep going and you’ll have[something like`printf`](https://nullprogram.com/blog/2023/02/13/)before long. If
+the write fails, we should probably communicate the error with at least
+the exit status. Because`\_start`doesn’t return a status, we need to
+exit, for which we have`proc\_exit`. It doesn’t return, so no`errno`return value.
+```
+`WASI("proc\_exit")voidproc\_exit(i32);void\_start(void){// ...i32err=fd\_write(1,&amp;iov,1,&amp;len);proc\_exit(!!err);}`
+```
+To get the command line arguments, call`args\_sizes\_get`to get the size,
+allocate some memory, then`args\_get`to read the arguments. Same goes for
+the environment with a similar pair of functions. The sizes do not include
+a null pointer terminator, which is sensible.
+Now that you know how to find and use these functions, you don’t need me
+to go through each one. However,*opening files*is a special, complicated
+case:
+```
+`WASI("path\_open")i32path\_open(i32,i32,u8\*,iz,i32,i64,i64,i32,i32\*);`
+```
+That’s 9 parameters —and I had thought[Win32`CreateFileW`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)was
+over the top. It’s even more complex than it looks. It works more like[POSIX`openat()`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/openat.html), except there’s no current working directory
+and so no`AT\_FDCWD`. Every file and directory is opened*relative to*another directory, and absolute paths are invalid. If there’s no`AT\_FDCWD`, how does one open the*first*directory? That’s called a*preopen*and it’s core to the file system security mechanism of WASI.
+The Wasm runtime preopens zero or more directories before starting the
+program and assigns them the lowest numbered file descriptors starting at
+file descriptor 3 (after standard input, output, and error). A program
+intending to use`path\_open`must first traverse the file descriptors,
+probing for preopens with`fd\_prestat\_get`and retrieving their path name
+with`fd\_prestat\_dir\_name`. This name may or may not map back onto a real
+system path, and so this is a kind of virtual file system for the Wasm
+module. The probe stops on the first error.
+To open an absolute path, it must find a matching preopen, then from it
+construct a path relative to that directory. This part I much dislike, as
+the module must contain complex path parsing functionality even in the
+simple case. Opening files is the most complex piece of the whole API.
+I mentioned before that program data is below the Clang stack. With the
+stack growing down, this sounds like a bad idea. A stack overflow quietly
+clobbers your data, and is difficult to recognize. More sensible to put
+the stack at the bottom so that it overflows off the bottom of memory and
+causes a fast fault. Fortunately there’s a switch for that:
+```
+`$ clang --target=wasm32 ... -Wl,--stack-first ...`
+```
+This is what you want by default. The actual default layout is left over
+from an early design flaw in`wasm-ld`, and it’s an oversight that it has
+not yet been corrected.
+### u-config
+The above is in action in the[u-config Wasm port](https://github.com/skeeto/u-config/blob/0c86829e/main_wasm.c). You can download
+the Wasm module,[pkg-config.wasm](https://skeeto.github.io/u-config/pkg-config.wasm), used in the web demo to run it in
+your favorite WASI-capable Wasm runtime:
+```
+`$ wazero run pkg-config.wasm --modversion pkg-config
+0.33.3`
+```
+Though there are no preopens, so it cannot read any files. The`-mount`option maps real file system paths to preopens. This mounts the entire
+root file system read-only (`ro`) as`/`.
+```
+`$ wazero run -mount /::ro pkg-config.wasm --cflags sdl2
+-I/usr/include/SDL2 -D\_REENTRANT`
+```
+I doubt this is useful for anything, but it was a vehicle for learning and
+trying Wasm, and the results are pretty neat.
+In the next article I discuss[allocating the allocator](https://nullprogram.com/blog/2025/04/19/).
+

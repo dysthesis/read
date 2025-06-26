@@ -12,13 +12,12 @@
     r = {
       url = "github:dysthesis/r";
       inputs.nixpkgs.follows = "nixpkgs";
-      };
+    };
 
-sim = {
+    sim = {
       url = "github:dysthesis/sim";
       inputs.nixpkgs.follows = "nixpkgs";
-      };
-
+    };
 
     # Personal library
     babel = {
@@ -44,7 +43,6 @@ sim = {
       "x86_64-darwin"
       "aarch64-darwin"
     ];
-
 
     forAllSystems = lib.babel.forAllSystems {inherit systems;};
 

@@ -15,10 +15,10 @@ in
     set -euo pipefail
     IFS=$'\n\t'
 
-    LIKED_FILE="liked.txt"
-    DISLIKED_FILE="disliked.txt"
     CACHE_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/read"
     mkdir -p "$CACHE_DIR"
+    LIKED_FILE="$CACHE_DIR/liked.txt"
+    DISLIKED_FILE="$CACHE_DIR/disliked.txt"
     ENTRIES_JSON="$CACHE_DIR/entries.json"
     VIEWER="${getExe glow} -p -"
     SHELL="${getExe bash}"
@@ -47,15 +47,23 @@ in
 
     build_menu() {
       local idx=0
+
+      if   [ "$(tput colors)" -ge 256 ];  then AUTHOR_CLR="$(tput setaf 244)"
+      elif [ "$(tput colors)" -ge 16 ];   then AUTHOR_CLR="$(tput setaf 8)"
+      else
+           AUTHOR_CLR="$(tput dim)"
+      fi
+      TITLE_CLR="$(tput bold)"
+      RESET="$(tput sgr0)"
       ${getExe jq} -c '.[]' "$ENTRIES_JSON" | while read -r line; do
         local title url content pub author
         title=$(${getExe jq} -r '.title' <<< "$line")
         url=$(${getExe jq} -r '.url'   <<< "$line")
-        author=$(${getExe jq} -r '.author // empty' <<< "$line")
+        author=$(${getExe jq} -r '(.author | select(length>0)) // .source_title // empty' <<<"$line")
         content=$(${getExe jq} -r '.content' <<< "$line")
 
         local score=$(score_one "$idx" "$content")
-        printf '%s\t%s\t%s\t%s\n' "$score" "$idx" "$title" "$author|$url"
+        printf '%s\t%s\t%s\t%s\n' "$score" "$idx" "$TITLE_CLR$title$RESET" "$AUTHOR_CLR$author$RESET"
         idx=$((idx+1))
       done | sort -r -n -k1,1   # highest score first
     }
@@ -63,14 +71,14 @@ in
     preview_cmd() {
         cat <<'EOF'
     idx={2}
-    $JQ -r ".[$idx].content" "$ENTRIES_JSON" | CLICOLOR_FORCE=1 COLORTERM=truecolor $GLOW -p -
+    $JQ -r ".[$idx].content" "$ENTRIES_JSON" | CLICOLOR_FORCE=1 COLORTERM=truecolor $GLOW -w 100 -s dark -p -
     EOF
     }
 
     open_viewer() {
         idx=$1
         line="$($JQ -c ".[$idx]" "$ENTRIES_JSON")"
-        $JQ -r '.content' <<<"$line" | CLICOLOR_FORCE=1 COLORTERM=truecolor $GLOW -p -
+        $JQ -r '.content' <<<"$line" | CLICOLOR_FORCE=1 COLORTERM=truecolor $GLOW -w 100 -s dark -p -
     }
 
     append_feedback() {
@@ -88,7 +96,7 @@ in
           --bind "alt-l:ignore+execute-silent($(printf %q "$0") __like {2})+reload($(printf %q "$0") __menu)" \
           --bind "alt-d:execute-silent($(printf %q "$0") __dislike {2})+reload($(printf %q "$0") __menu)" \
           --bind "enter:execute($(printf %q "$0") __view {2})" \
-          --preview-window=right:70%:wrap \
+          --preview-window=right:60%:wrap \
           <"$CACHE_DIR/menu.tsv"
     }
 

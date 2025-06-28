@@ -1,5 +1,5 @@
 {
-  xq,
+  sfeed,
   fzf,
   sim,
   writeShellApplication,
@@ -10,7 +10,7 @@ writeShellApplication {
   text = builtins.readFile ../../read;
   runtimeInputs = [
     sim
-    xq
+    sfeed
     fzf
   ];
 }

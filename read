@@ -1,3 +1,12 @@
 #!/usr/bin/env sh
 
-echo "Hello"
+XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+config="$1"
+feeds="$XDG_DATA_HOME/sfeed/feeds"
+
+sfeed_update "$config" || true
+
+url=$(sfeed_plain "$feeds"/* |
+  fzf --ansi --multi |
+  sed -n 's@^.* \([a-zA-Z]*://\)\(.*\)$@\1\2@p')
+test -n "${url}" && zen "${url}"

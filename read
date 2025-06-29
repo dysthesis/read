@@ -5,6 +5,17 @@ XDG_CACHE_HOME=${XDG_CACHE_HOME:-"$HOME/.local/share"}
 XDG_CONFIG_HOME=${XDG_CACHE_HOME:-"$HOME/.config"}
 CACHE_FILE=${CACHE_FILE:-"$XDG_CACHE_HOME/read/contents.json"}
 
+CLIP_CMD=${CLIP_CMD:-$(
+  if command -v wl-copy >/dev/null 2>&1; then
+    printf '%s' 'wl-copy'
+  elif command -v xclip >/dev/null 2>&1; then
+    printf '%s' 'xclip -selection clipboard'
+  elif command -v pbcopy >/dev/null 2>&1; then
+    printf '%s' 'pbcopy'
+  else printf '%s' 'cat'; fi # fallback does nothing, but never crashes
+)}
+export CLIP_CMD
+
 SHELL="sh"
 
 LIKED_FILE="$XDG_CACHE_HOME/read/liked.txt"
@@ -17,7 +28,7 @@ export CACHE_FILE LIKED_FILE DISLIKED_FILE
 
 log() { printf '%s\n' "$*" >&2; }
 
-# shell_quote: emit $1 as a single-quoted shell string, POSIX portable
+# emit $1 as a single-quoted shell string, POSIX portable
 shell_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
@@ -166,6 +177,13 @@ append_feedback() {
   printf '\n' >>"$file"
 }
 
+copy_url() { # copy_url <idx>
+  idx=$1
+  url=$(jq -r ".[$idx].url // empty" "$CACHE_FILE") || return
+  [ -n "$url" ] || return # nothing to copy
+  printf '%s' "$url" | eval "$CLIP_CMD" >/dev/null 2>&1
+}
+
 fzf_loop() {
   build_menu |
     fzf --ansi --multi --no-sort \
@@ -174,6 +192,7 @@ fzf_loop() {
       --preview-window=right:60%:wrap \
       --bind "alt-l:execute-silent($(shell_quote "$0") __like {2})+reload($(shell_quote "$0") __menu)" \
       --bind "alt-d:execute-silent($(shell_quote "$0") __dislike {2})+reload($(shell_quote "$0") __menu)" \
+      --bind "alt-y:execute-silent($(shell_quote "$0") __copy {2})" \
       --bind "enter:execute($(shell_quote "$0") __view {2})"
 }
 
@@ -192,5 +211,9 @@ __dislike)
   append_feedback "$1" "$DISLIKED_FILE"
   ;;
 __menu) build_menu ;;
+__copy)
+  shift
+  copy_url "$1"
+  ;;
 show | *) fzf_loop ;;
 esac

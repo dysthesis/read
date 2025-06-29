@@ -162,13 +162,13 @@ build_menu() {
 preview_cmd() {
   cat <<'EOS'
 idx={2}
-jq -r ".[$idx].content" "$CACHE_FILE" | CLICOLOR_FORCE=1 COLORTERM=truecolor glow -p -w 140 -s dark -
+jq -r ".[$idx].content" "$CACHE_FILE" | mdcat
 EOS
 }
 
 open_viewer() {
   idx=$1
-  jq -r ".[$idx].content" "$CACHE_FILE" | glow -p -w 100 -s dark -
+  jq -r ".[$idx].content" "$CACHE_FILE" | mdcat -p
 }
 
 append_feedback() {

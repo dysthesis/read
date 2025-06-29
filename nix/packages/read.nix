@@ -1,4 +1,5 @@
 {
+  cleanutil,
   uutils-findutils,
   jq,
   fzf,
@@ -16,5 +17,7 @@ writeShellApplication {
     fzf
     r
     uutils-findutils
+    cleanutil
   ];
+  checkPhase = false;
 }

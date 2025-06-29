@@ -10,5 +10,6 @@
     inherit pkgs inputs lib self;
     inherit (inputs.sim.packages.${pkgs.system}) sim;
     inherit (inputs.r.packages.${pkgs.system}) r;
+    cleanutil = inputs.clean.packages.${pkgs.system}.clean;
   };
 }

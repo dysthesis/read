@@ -1,40 +1,77 @@
-#!/usr/bin/env sh
+#!/usr/bin/echo sh
 set -eu
 
-URLS=$1      # list of URLs, one per line
-JOBS=${2:-8} # max concurrent workers
+URLS=$1      # file of feed URLs
+JOBS=${2:-64} # parallelism
 
-tmpdir=$(mktemp -d) || exit 1
-trap 'rm -rf "$tmpdir" "$sem"' EXIT INT HUP TERM
+tmp=$(mktemp -d) || exit 1
+trap 'rm -rf "$tmp" "$sem"' EXIT INT HUP TERM
 
-echo "[+] Initialising semaphore..."
 sem=$(mktemp -u)
 mkfifo "$sem"
-
-exec 3<>"$sem"
-exec 4>&3
-rm "$sem"
-
-echo "[+] Preloading $JOBS tokens..."
+exec 3<>"$sem" 4>&3
+rm "$sem" # remove the name; FIFO lives on
 i=0
 while [ "$i" -lt "$JOBS" ]; do
   printf '\n' >&4
   i=$((i + 1))
 done
 
-echo "[+] Fetching..."
+log() { printf '%s\n' "$*" >&2; }
+
+log "[+] clean: $(readlink "$(which clean)")"
+
 i=0
-while IFS= read -r url || [ -n "$url" ]; do
-  IFS= read -r _ <&3 # wait for a token
+while IFS= read -r feed || [ -n "$feed" ]; do
+  IFS= read -r _ <&3 # wait for token
   i=$((i + 1))
+
   {
-    curl -sLf "$url" | r >"$tmpdir/$i.json" 2>/dev/null ||
-      printf '[]\n' >"$tmpdir/$i.json"
+    log "[#${i}] Fetching $feed …"
+
+    #  Curl with retries but WITHOUT -f so we can inspect HTTP status
+    data=$(curl -sL --retry 3 --max-time 20 "$feed") ||
+      {
+        log "[#${i}] curl failed ($?)"
+        printf '[]'
+      }
+
+    #  Parse; if r errors, preserve its output but log and continue
+    json=$(
+      printf '%s' "$data" | r 2>"$tmp/r-${i}.err"
+      echo $?
+    )
+
+    if [ "${json##*$'\n'}" -ne 0 ]; then # last line from subshell is status
+      log "[#${i}] r exited ${json##*$'\n'}, feed ignored"
+      printf '[]' >"$tmp/$i.json"
+      printf '\n' >&4
+      exit 0
+    fi
+    json=${json%$'\n'*} # strip status
+
+    # Enrich each article
+    printf '%s\n' "$json" |
+      jq -c '.[]' | # stream objects
+      while IFS= read -r art; do
+        url=$(printf '%s\n' "$art" | jq -r '.url // empty')
+        [ -z "$url" ] && {
+          printf '%s\n' "$art"
+          continue
+        }
+
+        body=$(clean --markdown "$url" 2>/dev/null | jq -Rs .)   # JSON-encode once
+        printf '%s\n' "$art" |
+          jq --argjson c "$body" '.content = $c'
+      done |
+      jq -s '.' >"$tmp/$i.json"
+
     printf '\n' >&4 # return token
   } &
 done <"$URLS"
 
-wait # wait for all jobs
+wait
 
-echo "[+] Merging..."
-find "$tmpdir" -name '*.json' | sort -n | xargs cat | jq -s add
+log '[+] Merging …'
+find "$tmp" -name '*.json' -print0 |
+  xargs -0 cat | jq -s 'add' # merge arrays

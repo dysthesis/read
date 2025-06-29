@@ -1,0 +1,196 @@
+#!/usr/bin/env sh
+set -eu
+
+XDG_CACHE_HOME=${XDG_CACHE_HOME:-"$HOME/.local/share"}
+XDG_CONFIG_HOME=${XDG_CACHE_HOME:-"$HOME/.config"}
+CACHE_FILE=${CACHE_FILE:-"$XDG_CACHE_HOME/read/contents.json"}
+
+SHELL="sh"
+
+LIKED_FILE="$XDG_CACHE_HOME/read/liked.txt"
+DISLIKED_FILE="$XDG_CACHE_HOME/read/disliked.txt"
+
+URLS=${URLS:-$XDG_CONFIG_HOME/read/feeds} # file containing feed URLs, one per line
+JOBS=${JOBS:-64}                          # maximum concurrent feed workers
+
+export CACHE_FILE LIKED_FILE DISLIKED_FILE
+
+log() { printf '%s\n' "$*" >&2; }
+
+# shell_quote: emit $1 as a single-quoted shell string, POSIX portable
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+update_feeds() {
+  tmp=$(mktemp -d) || exit 1
+  trap 'rm -rf "$tmp" "$sem"' EXIT INT HUP TERM
+
+  sem=$(mktemp -u)
+  mkfifo "$sem"
+  exec 3<>"$sem" 4>&3
+  rm "$sem" # remove pathname; FIFO stays open
+  i=0
+  while [ "$i" -lt "$JOBS" ]; do # preload N tokens
+    printf '\n' >&4
+    i=$((i + 1))
+  done
+
+  i=0
+  while IFS= read -r feed || [ -n "$feed" ]; do
+    IFS= read -r _ <&3 # wait for a free token
+    i=$((i + 1))
+
+    {
+      log "[#${i}] Fetching $feed..."
+
+      if ! data=$(curl -sL --retry 3 --max-time 20 "$feed"); then
+        log "[#${i}] curl failed ($?) – feed ignored"
+        printf '[]' >"$tmp/$i.json"
+        printf '\n' >&4 # return token
+        exit 0
+      fi
+
+      json=$(printf '%s' "$data" | r 2>"$tmp/r-${i}.err")
+      r_status=$?
+      if [ "$r_status" -ne 0 ]; then
+        log "[#${i}] r exited $r_status – feed ignored"
+        printf '[]' >"$tmp/$i.json"
+        printf '\n' >&4
+        exit 0
+      fi
+
+      printf '%s\n' "$json" |
+        jq -c '.[]' | # stream objects, one per line
+        while IFS= read -r art; do
+          url=$(printf '%s\n' "$art" | jq -r '.url // empty')
+          [ -z "$url" ] && {
+            printf '%s\n' "$art"
+            continue
+          }
+
+          body=$(clean --markdown "$url" 2>/dev/null | jq -Rs .)
+          printf '%s\n' "$art" |
+            jq --argjson c "$body" '.content = $c' # overwrite unconditionally
+        done |
+        jq -s '.' >"$tmp/$i.json" # re-assemble array
+
+      printf '\n' >&4 # return token
+    } &
+  done <"$URLS"
+
+  wait
+
+  log '[+] Merging...'
+  find "$tmp" -name '*.json' -print0 |
+    xargs -0 cat | jq -s 'add' >"$CACHE_FILE"
+
+  log "[+] Written merged array to $CACHE_FILE"
+}
+
+# score_one idx text
+score_one() {
+  idx=$1
+  text=$2
+
+  like=0
+  dis=0
+
+  # Create a secure temporary file for the article text
+  tmp=$(mktemp -t read_score.XXXXXX) || {
+    printf >&2 'mktemp failed\n'
+    return 1
+  }
+  printf '%s' "$text" >"$tmp"
+
+  if [ -s "$LIKED_FILE" ]; then
+    like=$(sim "$tmp" "$LIKED_FILE" | awk '{print $NF+0}')
+  fi
+  if [ -s "$DISLIKED_FILE" ]; then
+    dis=$(sim "$tmp" "$DISLIKED_FILE" | awk '{print $NF+0}')
+  fi
+
+  rm -f -- "$tmp" # always clean up
+
+  # like − dislike
+  awk -v a="$like" -v b="$dis" 'BEGIN{printf "%.3f", a-b}'
+}
+
+build_menu() {
+  idx=0
+
+  colors=$(tput colors 2>/dev/null || printf %s 0)
+  if [ "$colors" -ge 256 ]; then
+    AUTHOR_CLR=$(tput setaf 244)
+  elif [ "$colors" -ge 16 ]; then
+    AUTHOR_CLR=$(tput setaf 8)
+  else
+    AUTHOR_CLR=$(tput dim)
+  fi
+  TITLE_CLR=$(tput bold)
+  RESET=$(tput sgr0)
+
+  jq -c '.[]' "$CACHE_FILE" |
+    while IFS= read -r line; do
+      # Extract the bits we need from the current JSON object
+      title=$(printf '%s\n' "$line" | jq -r '.title')
+      url=$(printf '%s\n' "$line" | jq -r '.url')
+      author=$(printf '%s\n' "$line" |
+        jq -r '(.author | select(length>0)) // .source_title // empty')
+      content=$(printf '%s\n' "$line" | jq -r '.content')
+
+      score=$(score_one "$idx" "$content")
+      printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$score" "$idx" "${TITLE_CLR}${title}${RESET}" \
+        "${AUTHOR_CLR} – ${author}${RESET}" \
+        "${AUTHOR_CLR}${score}${RESET}"
+
+      idx=$((idx + 1))
+    done | sort -r -n -k1,1 # highest score first
+}
+
+preview_cmd() {
+  cat <<'EOS'
+idx={2}
+jq -r ".[$idx].content" "$CACHE_FILE" | CLICOLOR_FORCE=1 COLORTERM=truecolor glow -p -w 140 -s dark -
+EOS
+}
+
+open_viewer() {
+  idx=$1
+  jq -r ".[$idx].content" "$CACHE_FILE" | glow -p -w 100 -s dark -
+}
+
+append_feedback() {
+  idx=$1 file=$2
+  jq -r ".[$idx].content" "$CACHE_FILE" >>"$file"
+  printf '\n' >>"$file"
+}
+
+fzf_loop() {
+  build_menu |
+    fzf --ansi --multi --no-sort \
+      --delimiter='\t' --with-nth=3.. \
+      --preview "$(preview_cmd)" \
+      --preview-window=right:60%:wrap \
+      --bind "alt-l:execute-silent($(shell_quote "$0") __like {2})+reload($(shell_quote "$0") __menu)" \
+      --bind "alt-d:execute-silent($(shell_quote "$0") __dislike {2})+reload($(shell_quote "$0") __menu)" \
+      --bind "enter:execute($(shell_quote "$0") __view {2})"
+}
+
+case ${1:-show} in
+update) update_feeds ;;
+__view)
+  shift
+  open_viewer "$1"
+  ;;
+__like)
+  shift
+  append_feedback "$1" "$LIKED_FILE"
+  ;;
+__dislike)
+  shift
+  append_feedback "$1" "$DISLIKED_FILE"
+  ;;
+__menu) build_menu ;;
+show | *) fzf_loop ;;
+esac

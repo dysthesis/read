@@ -1,4 +1,4 @@
-{pkgs, ...}:
+{ pkgs, ... }:
 pkgs.mkShell {
   name = "read";
 
@@ -9,5 +9,8 @@ pkgs.mkShell {
     deadnix
     cargo
     bacon
+    shellcheck
+    shfmt
+    bash-language-server
   ];
 }

@@ -5,10 +5,22 @@ XDG_CACHE_HOME=${XDG_CACHE_HOME:-"$HOME/.local/share"}
 XDG_CONFIG_HOME=${XDG_CACHE_HOME:-"$HOME/.config"}
 CACHE_FILE=${CACHE_FILE:-"$XDG_CACHE_HOME/read/contents.json"}
 
-SUBCOMMAND=${1:-"show"}
+SHELL="bash"
+
+LIKED_FILE="$XDG_CACHE_HOME/read/liked.txt"
+DISLIKED_FILE="$XDG_CACHE_HOME/read/disliked.txt"
+
 URLS=${2:-$XDG_CONFIG_HOME/read/feeds} # file containing feed URLs, one per line
 JOBS=${3:-64}                          # maximum concurrent feed workers
 
+export CACHE_FILE LIKED_FILE DISLIKED_FILE
+
+log() { printf '%s\n' "$*" >&2; }
+
+# shell_quote: emit $1 as a single-quoted shell string, POSIX portable
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
 update_feeds() {
   tmp=$(mktemp -d) || exit 1
   trap 'rm -rf "$tmp" "$sem"' EXIT INT HUP TERM
@@ -22,8 +34,6 @@ update_feeds() {
     printf '\n' >&4
     i=$((i + 1))
   done
-
-  log() { printf '%s\n' "$*" >&2; }
 
   i=0
   while IFS= read -r feed || [ -n "$feed" ]; do
@@ -77,11 +87,99 @@ update_feeds() {
   log "[+] Written merged array to $CACHE_FILE"
 }
 
-case $SUBCOMMAND in
-"update")
-  update_feeds
+# score_one idx text
+score_one() {
+  idx=$1
+  text=$2
+
+  like=0
+  dis=0
+
+  # Create a secure temporary file for the article text
+  tmp=$(mktemp -t read_score.XXXXXX) || {
+    printf >&2 'mktemp failed\n'
+    return 1
+  }
+  printf '%s' "$text" >"$tmp"
+
+  if [ -s "$LIKED_FILE" ]; then
+    like=$(sim "$tmp" "$LIKED_FILE" | awk '{print $NF+0}')
+  fi
+  if [ -s "$DISLIKED_FILE" ]; then
+    dis=$(sim "$tmp" "$DISLIKED_FILE" | awk '{print $NF+0}')
+  fi
+
+  rm -f -- "$tmp" # always clean up
+
+  # like − dislike
+  awk -v a="$like" -v b="$dis" 'BEGIN{printf "%.3f", a-b}'
+}
+
+build_menu() {
+  TAB=$(printf '\t') # literal TAB, POSIX-safe
+  bold=$(tput bold)
+  reset=$(tput sgr0)
+  grey=$(tput setaf 244 2>/dev/null || tput dim)
+
+  jq -r 'to_entries[]
+         | [.key, .value.title,
+            (.value.author // .value.source_title // ""),
+            .value.content] | @tsv' "$CACHE_FILE" |
+    while IFS="$TAB" read -r idx title author body; do
+      log "[+] author: $author"
+      score=$(score_one "$idx" "$body") # keep scoring logic
+
+      coloured_title="${bold}${title}${reset}"
+      coloured_author="${grey} – ${author}${reset}"
+
+      printf '%s\t%s\t%s\t%s\n' \
+        "$score" "$idx" "$coloured_title" "$coloured_author"
+    done | sort -r -n -k1,1 # highest score first
+}
+
+preview_cmd() {
+  cat <<'EOS'
+idx={2}
+jq -r ".[$idx].content" "$CACHE_FILE" | CLICOLOR_FORCE=1 COLORTERM=truecolor glow -p -w 140 -s dark -
+EOS
+}
+
+open_viewer() {
+  idx=$1
+  jq -r ".[$idx].content" "$CACHE_FILE" | glow -p -w 100 -s dark -
+}
+
+append_feedback() {
+  idx=$1 file=$2
+  jq -r ".[$idx].content" "$CACHE_FILE" >>"$file"
+  printf '\n' >>"$file"
+}
+
+fzf_loop() {
+  build_menu |
+    fzf --ansi --multi --no-sort \
+      --delimiter='\t' --with-nth=3.. \
+      --preview "$(preview_cmd)" \
+      --preview-window=right:60%:wrap \
+      --bind "alt-l:execute-silent($(shell_quote "$0") __like {2})+reload($(shell_quote "$0") __menu)" \
+      --bind "alt-d:execute-silent($(shell_quote "$0") __dislike {2})+reload($(shell_quote "$0") __menu)" \
+      --bind "enter:execute($(shell_quote "$0") __view {2})"
+}
+
+case ${1:-show} in
+update) update_feeds ;;
+__view)
+  shift
+  open_viewer "$1"
   ;;
-*)
-  echo "Invalid subcommand!"
+__like)
+  shift
+  append_feedback "$1" "$LIKED_FILE"
   ;;
+__dislike)
+  shift
+  append_feedback "$1" "$DISLIKED_FILE"
+  ;;
+__menu) build_menu ;;
+show | *) fzf_loop ;;
 esac

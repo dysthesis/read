@@ -1,4 +1,5 @@
 {
+  glow,
   cleanutil,
   uutils-findutils,
   jq,
@@ -18,6 +19,7 @@ writeShellApplication {
     r
     uutils-findutils
     cleanutil
+    glow
   ];
   checkPhase = false;
 }

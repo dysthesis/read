@@ -1,12 +1,40 @@
 #!/usr/bin/env sh
+set -eu
 
-XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
-config="$1"
-feeds="$XDG_DATA_HOME/sfeed/feeds"
+URLS=$1      # list of URLs, one per line
+JOBS=${2:-8} # max concurrent workers
 
-sfeed_update "$config" || true
+tmpdir=$(mktemp -d) || exit 1
+trap 'rm -rf "$tmpdir" "$sem"' EXIT INT HUP TERM
 
-url=$(sfeed_plain "$feeds"/* |
-  fzf --ansi --multi |
-  sed -n 's@^.* \([a-zA-Z]*://\)\(.*\)$@\1\2@p')
-test -n "${url}" && zen "${url}"
+echo "[+] Initialising semaphore..."
+sem=$(mktemp -u)
+mkfifo "$sem"
+
+exec 3<>"$sem"
+exec 4>&3
+rm "$sem"
+
+echo "[+] Preloading $JOBS tokens..."
+i=0
+while [ "$i" -lt "$JOBS" ]; do
+  printf '\n' >&4
+  i=$((i + 1))
+done
+
+echo "[+] Fetching..."
+i=0
+while IFS= read -r url || [ -n "$url" ]; do
+  IFS= read -r _ <&3 # wait for a token
+  i=$((i + 1))
+  {
+    curl -sLf "$url" | r >"$tmpdir/$i.json" 2>/dev/null ||
+      printf '[]\n' >"$tmpdir/$i.json"
+    printf '\n' >&4 # return token
+  } &
+done <"$URLS"
+
+wait # wait for all jobs
+
+echo "[+] Merging..."
+find "$tmpdir" -name '*.json' | sort -n | xargs cat | jq -s add

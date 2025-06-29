@@ -1,7 +1,9 @@
 {
-  sfeed,
+  uutils-findutils,
+  jq,
   fzf,
   sim,
+  r,
   writeShellApplication,
   ...
 }:
@@ -10,7 +12,9 @@ writeShellApplication {
   text = builtins.readFile ../../read;
   runtimeInputs = [
     sim
-    sfeed
+    jq
     fzf
+    r
+    uutils-findutils
   ];
 }

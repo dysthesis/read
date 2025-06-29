@@ -5,13 +5,13 @@ XDG_CACHE_HOME=${XDG_CACHE_HOME:-"$HOME/.local/share"}
 XDG_CONFIG_HOME=${XDG_CACHE_HOME:-"$HOME/.config"}
 CACHE_FILE=${CACHE_FILE:-"$XDG_CACHE_HOME/read/contents.json"}
 
-SHELL="bash"
+SHELL="sh"
 
 LIKED_FILE="$XDG_CACHE_HOME/read/liked.txt"
 DISLIKED_FILE="$XDG_CACHE_HOME/read/disliked.txt"
 
-URLS=${2:-$XDG_CONFIG_HOME/read/feeds} # file containing feed URLs, one per line
-JOBS=${3:-64}                          # maximum concurrent feed workers
+URLS=${URLS:-$XDG_CONFIG_HOME/read/feeds} # file containing feed URLs, one per line
+JOBS=${JOBS:-64}                          # maximum concurrent feed workers
 
 export CACHE_FILE LIKED_FILE DISLIKED_FILE
 
@@ -41,7 +41,7 @@ update_feeds() {
     i=$((i + 1))
 
     {
-      log "[#${i}] Fetching $feed …"
+      log "[#${i}] Fetching $feed..."
 
       if ! data=$(curl -sL --retry 3 --max-time 20 "$feed"); then
         log "[#${i}] curl failed ($?) – feed ignored"
@@ -80,7 +80,7 @@ update_feeds() {
 
   wait
 
-  log '[+] Merging …'
+  log '[+] Merging...'
   find "$tmp" -name '*.json' -print0 |
     xargs -0 cat | jq -s 'add' >"$CACHE_FILE"
 
@@ -116,24 +116,34 @@ score_one() {
 }
 
 build_menu() {
-  TAB=$(printf '\t') # literal TAB, POSIX-safe
-  bold=$(tput bold)
-  reset=$(tput sgr0)
-  grey=$(tput setaf 244 2>/dev/null || tput dim)
+  idx=0
 
-  jq -r 'to_entries[]
-         | [.key, .value.title,
-            (.value.author // .value.source_title // ""),
-            .value.content] | @tsv' "$CACHE_FILE" |
-    while IFS="$TAB" read -r idx title author body; do
-      log "[+] author: $author"
-      score=$(score_one "$idx" "$body") # keep scoring logic
+  colors=$(tput colors 2>/dev/null || printf %s 0)
+  if [ "$colors" -ge 256 ]; then
+    AUTHOR_CLR=$(tput setaf 244)
+  elif [ "$colors" -ge 16 ]; then
+    AUTHOR_CLR=$(tput setaf 8)
+  else
+    AUTHOR_CLR=$(tput dim)
+  fi
+  TITLE_CLR=$(tput bold)
+  RESET=$(tput sgr0)
 
-      coloured_title="${bold}${title}${reset}"
-      coloured_author="${grey} – ${author}${reset}"
+  jq -c '.[]' "$CACHE_FILE" |
+    while IFS= read -r line; do
+      # Extract the bits we need from the current JSON object
+      title=$(printf '%s\n' "$line" | jq -r '.title')
+      url=$(printf '%s\n' "$line" | jq -r '.url')
+      author=$(printf '%s\n' "$line" |
+        jq -r '(.author | select(length>0)) // .source_title // empty')
+      content=$(printf '%s\n' "$line" | jq -r '.content')
 
+      score=$(score_one "$idx" "$content")
       printf '%s\t%s\t%s\t%s\n' \
-        "$score" "$idx" "$coloured_title" "$coloured_author"
+        "$score" "$idx" "${TITLE_CLR}${title}${RESET}" \
+        "${AUTHOR_CLR}${author}${RESET}"
+
+      idx=$((idx + 1))
     done | sort -r -n -k1,1 # highest score first
 }
 

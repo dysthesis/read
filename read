@@ -139,9 +139,10 @@ build_menu() {
       content=$(printf '%s\n' "$line" | jq -r '.content')
 
       score=$(score_one "$idx" "$content")
-      printf '%s\t%s\t%s\t%s\n' \
+      printf '%s\t%s\t%s\t%s\t%s\n' \
         "$score" "$idx" "${TITLE_CLR}${title}${RESET}" \
-        "${AUTHOR_CLR}${author}${RESET}"
+        "${AUTHOR_CLR} – ${author}${RESET}" \
+        "${AUTHOR_CLR}${score}${RESET}"
 
       idx=$((idx + 1))
     done | sort -r -n -k1,1 # highest score first

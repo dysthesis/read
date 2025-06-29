@@ -6,7 +6,6 @@ _: {
     stylua.enable = true;
     prettier.enable = true;
     toml-sort.enable = true;
-    shellcheck = true;
     shfmt = {
       enable = true;
       indent_size = 4;

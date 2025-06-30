@@ -4,8 +4,7 @@
   lib,
   inputs,
   ...
-}:
-rec {
+}: rec {
   default = read;
   read = pkgs.callPackage ./read.nix {
     inherit
@@ -16,6 +15,6 @@ rec {
       ;
     inherit (inputs.sim.packages.${pkgs.system}) sim;
     inherit (inputs.r.packages.${pkgs.system}) r;
-    cleanutil = inputs.clean.packages.${pkgs.system}.clean;
+    inherit (inputs.clean.packages.${pkgs.system}) clean;
   };
 }

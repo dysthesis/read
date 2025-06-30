@@ -102,9 +102,22 @@ update_feeds() {
             continue
           }
 
-          body=$(clean --markdown "$url" 2>/dev/null | jq -Rs .)
-          printf '%s\n' "$art" |
-            jq --argjson c "$body" '.content = $c' # overwrite unconditionally
+          tmp_body=$(mktemp) || {
+            log "mktemp failed"
+            continue
+          }
+
+          # 1.  Produce Markdown → file (with safety belt)
+          if timeout 30 clean --markdown "$url" 2>>"$CACHE_DIR/clean.err" >"$tmp_body"; then
+            # 2.  Merge without huge argv / without python
+            printf '%s\n' "$art" |
+              jq --rawfile body "$tmp_body" '.content = $body'
+          else
+            log "[#${i}] body skipped – clean failed for $url"
+            printf '%s\n' "$art"
+          fi
+
+          rm -f -- "$tmp_body"
         done |
         jq -s '.' >"$tmp/$i.json" # re-assemble array
 

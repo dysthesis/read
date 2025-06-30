@@ -1,6 +1,6 @@
 {
   mdcat,
-  cleanutil,
+  clean,
   uutils-findutils,
   jq,
   fzf,
@@ -18,7 +18,7 @@ writeShellApplication {
     fzf
     r
     uutils-findutils
-    cleanutil
+    clean
     mdcat
   ];
   checkPhase = false;

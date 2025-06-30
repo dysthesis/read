@@ -2,8 +2,9 @@
 set -eu
 
 XDG_CACHE_HOME=${XDG_CACHE_HOME:-"$HOME/.local/share"}
-XDG_CONFIG_HOME=${XDG_CACHE_HOME:-"$HOME/.config"}
-CACHE_FILE=${CACHE_FILE:-"$XDG_CACHE_HOME/read/contents.json"}
+XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-"$HOME/.config"}
+CACHE_DIR=${CACHE_DIR:-"$XDG_CACHE_HOME/read"}
+CACHE_FILE="$CACHE_DIR/contents.json"
 
 CLIP_CMD=${CLIP_CMD:-$(
   if command -v wl-copy >/dev/null 2>&1; then
@@ -18,8 +19,8 @@ export CLIP_CMD
 
 SHELL="sh"
 
-LIKED_FILE="$XDG_CACHE_HOME/read/liked.txt"
-DISLIKED_FILE="$XDG_CACHE_HOME/read/disliked.txt"
+LIKED_FILE="$CACHE_DIR/liked.txt"
+DISLIKED_FILE="$CACHE_DIR/disliked.txt"
 
 URLS=${URLS:-$XDG_CONFIG_HOME/read/feeds} # file containing feed URLs, one per line
 JOBS=${JOBS:-64}                          # maximum concurrent feed workers
@@ -27,6 +28,28 @@ JOBS=${JOBS:-64}                          # maximum concurrent feed workers
 export CACHE_FILE LIKED_FILE DISLIKED_FILE
 
 log() { printf '%s\n' "$*" >&2; }
+
+GIT=$(command -v git || true)
+
+init_git_repo() {
+  [ -n "$GIT" ] || return
+  if [ ! -d "$CACHE_DIR/.git" ]; then
+    git -C "$CACHE_DIR" init -q # new repo
+  fi
+}
+
+commit_if_changed() {
+  [ -n "$GIT" ] || return
+  # Take an exclusive lock to avoid concurrent writers
+  exec 9>"$CACHE_DIR/.git/commit.lock" && flock -n 9 || return # silently skip if busy
+  git -C "$CACHE_DIR" add -A
+  if ! git -C "$CACHE_DIR" diff-index --quiet HEAD --; then # changes?
+    git -C "$CACHE_DIR" commit -q -m "state: $(date -Iseconds)"
+  fi
+  flock -u 9 # release
+}
+
+init_git_repo
 
 # emit $1 as a single-quoted shell string, POSIX portable
 shell_quote() {
@@ -96,6 +119,7 @@ update_feeds() {
     xargs -0 cat | jq -s 'add' >"$CACHE_FILE"
 
   log "[+] Written merged array to $CACHE_FILE"
+  commit_if_changed
 }
 
 # score_one idx text
@@ -175,6 +199,7 @@ append_feedback() {
   idx=$1 file=$2
   jq -r ".[$idx].content" "$CACHE_FILE" >>"$file"
   printf '\n' >>"$file"
+  commit_if_changed
 }
 
 copy_url() { # copy_url <idx>
@@ -186,8 +211,15 @@ copy_url() { # copy_url <idx>
 
 fzf_loop() {
   build_menu |
-    fzf --ansi --multi --no-sort \
-      --delimiter='\t' --with-nth=3.. \
+    fzf --ansi \
+      --multi \
+      --no-sort \
+      --header="read - feed reader" \
+      --header-first \
+      --prompt="Search: " \
+      --layout=reverse \
+      --delimiter='\t' \
+      --with-nth=3.. \
       --preview "$(preview_cmd)" \
       --preview-window=right:60%:wrap \
       --bind "alt-l:execute-silent($(shell_quote "$0") __like {2})+reload($(shell_quote "$0") __menu)" \

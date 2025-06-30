@@ -6,6 +6,16 @@ XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-"$HOME/.config"}
 CACHE_DIR=${CACHE_DIR:-"$XDG_CACHE_HOME/read"}
 CACHE_FILE="$CACHE_DIR/contents.json"
 
+READ_FILE="$CACHE_DIR/read.txt"
+SHOW_FLAG="$CACHE_DIR/show_read.flag" # its existence means "show all"
+
+is_read() { grep -Fxq "$1" "$READ_FILE" 2>/dev/null; }
+mark_read() { is_read "$1" || printf '%s\n' "$1" >>"$READ_FILE"; }
+unmark_read() { [ -f "$READ_FILE" ] && grep -Fxv "$1" "$READ_FILE" >"$READ_FILE.$$" && mv "$READ_FILE.$$" "$READ_FILE"; }
+toggle_show() { [ -e "$SHOW_FLAG" ] && rm -f "$SHOW_FLAG" || : >"$SHOW_FLAG"; }
+
+export READ_FILE SHOW_FLAG
+
 CLIP_CMD=${CLIP_CMD:-$(
   if command -v wl-copy >/dev/null 2>&1; then
     printf '%s' 'wl-copy'
@@ -176,9 +186,14 @@ build_menu() {
   fi
   TITLE_CLR=$(tput bold)
   RESET=$(tput sgr0)
+  read_vis=$([ -e "$SHOW_FLAG" ] && echo 1 || echo 0)
 
   jq -c '.[]' "$CACHE_FILE" |
     while IFS= read -r line; do
+      id=$(printf '%s\n' "$line" | jq -r '.id')
+      if [ "$read_vis" -eq 0 ] && is_read "$id"; then
+        continue # hide read articles
+      fi
       # Extract the bits we need from the current JSON object
       title=$(printf '%s\n' "$line" | jq -r '.title')
       url=$(printf '%s\n' "$line" | jq -r '.url')
@@ -205,7 +220,14 @@ EOS
 
 open_viewer() {
   idx=$1
-  jq -r ".[$idx].content" "$CACHE_FILE" | mdcat -p
+  jq -r ".[$idx].content" "$CACHE_FILE" | mdcat -p --columns=100
+}
+
+open_and_mark() {
+  idx=$1
+  id=$(jq -r ".[$idx].id" "$CACHE_FILE")
+  mark_read "$id"
+  open_viewer "$idx"
 }
 
 append_feedback() {
@@ -238,14 +260,17 @@ fzf_loop() {
       --bind "alt-l:execute-silent($(shell_quote "$0") __like {2})+reload($(shell_quote "$0") __menu)" \
       --bind "alt-d:execute-silent($(shell_quote "$0") __dislike {2})+reload($(shell_quote "$0") __menu)" \
       --bind "alt-y:execute-silent($(shell_quote "$0") __copy {2})" \
-      --bind "enter:execute($(shell_quote "$0") __view {2})"
+      --bind "enter:execute($(shell_quote "$0") __view {2})+reload($(shell_quote "$0") __menu)" \
+      --bind "alt-u:execute-silent($(shell_quote "$0") __unread {2}) \
+                +reload($(shell_quote "$0") __menu)" \
+      --bind "alt-r:execute-silent($(shell_quote "$0") __toggle)+reload($(shell_quote "$0") __menu)"
 }
 
 case ${1:-show} in
 update) update_feeds ;;
 __view)
   shift
-  open_viewer "$1"
+  open_and_mark "$1"
   ;;
 __like)
   shift
@@ -256,6 +281,19 @@ __dislike)
   append_feedback "$1" "$DISLIKED_FILE"
   ;;
 __menu) build_menu ;;
+__markread)
+  shift
+  id=$(jq -r ".[$1].id" "$CACHE_FILE")
+  mark_read "$id"
+  commit_if_changed
+  ;;
+__unread)
+  shift
+  id=$(jq -r ".[$1].id" "$CACHE_FILE")
+  unmark_read "$id"
+  commit_if_changed
+  ;;
+__toggle) toggle_show ;; # no commit; purely a view flag
 __copy)
   shift
   copy_url "$1"

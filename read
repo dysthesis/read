@@ -118,7 +118,7 @@ update_feeds() {
           }
 
           # 1.  Produce Markdown → file (with safety belt)
-          if timeout 30 clean --markdown "$url" 2>>"$CACHE_DIR/clean.err" >"$tmp_body"; then
+          if clean --markdown "$url" 2>>"$CACHE_DIR/clean.err" >"$tmp_body"; then
             # 2.  Merge without huge argv / without python
             printf '%s\n' "$art" |
               jq --rawfile body "$tmp_body" '.content = $body'

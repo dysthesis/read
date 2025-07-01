@@ -287,7 +287,7 @@ build_menu() {
 preview_cmd() {
   cat <<'EOS'
 idx={2}
-jq -r ".[$idx].content" "$CACHE_FILE" | mdcat
+jq -r ".[$((idx - 1))].content" "$CACHE_FILE" | mdcat
 EOS
 }
 

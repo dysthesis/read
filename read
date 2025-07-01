@@ -293,7 +293,25 @@ EOS
 
 open_viewer() {
   idx=$1
-  jq -r ".[$idx].content" "$CACHE_FILE" | mdcat -p --columns=100
+
+  (
+    content_width=100
+
+    term_width=$(tput cols 2>/dev/null || echo "$content_width")
+
+    padding_len=$(((term_width - content_width) / 2))
+
+    if [ "$padding_len" -lt 0 ]; then
+      padding_len=0
+    fi
+
+    padding_str=$(printf '%*s' "$padding_len" "")
+
+    jq -r ".[$idx].content" "$CACHE_FILE" |
+      mdcat -p --columns="$content_width" |
+      sed "s/^/$padding_str/" |
+      less -RF
+  )
 }
 
 open_and_mark() {

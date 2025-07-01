@@ -165,7 +165,8 @@ compute_and_cache_score() {
     printf >&2 'mktemp failed\n'
     return 1
   }
-  printf '%s' "$text" >"$tmp"
+
+  printf '%s\n' "$text" >"$tmp"
 
   if [ -s "$LIKED_FILE" ]; then
     like=$(sim "$tmp" "$LIKED_FILE" | awk '{print $NF+0}')
@@ -245,23 +246,28 @@ build_menu() {
         # If we reach here, it is a CACHE MISS.
         # Print a special format for the shell to process.
         # We prefix with "SLOWPATH" to make it easy to filter.
-        printf "SLOWPATH\t%s\t%s\t%s\t%s\t%s\n",
-          id, title, author, content, NR
+        printf "SLOWPATH\t%s\t%s\t%s\t%s\n",
+          id, title, author, NR
       }
     ' "$READ_FILE" # awk reads read.txt here
   } | {
     # This block processes the combined output. It receives fully-formatted lines (fast path) and
     # SLOWPATH lines.
-    while IFS=$(printf '\t') read -r type col1 col2 col3 col4 col5; do
+    while IFS=$(printf '\t') read -r type col1 col2 col3 col4; do
       if [ "$type" = "SLOWPATH" ]; then
-        # A score needs to be computed
+        # A score needs to be computed. We have identifiers, not content.
         id=$col1
         title=$col2
         author=$col3
-        content=$col4
-        line_num=$col5
+        line_num=$col4 # This is NR from awk
 
-        # Call the dedicated function to do the expensive work
+        # Calculate the 0-based index for jq
+        jq_index=$((line_num - 1))
+
+        # Fetch the PRISTINE content directly from the source JSON file
+        content=$(jq -r --argjson idx "$jq_index" '.[$idx].content' "$CACHE_FILE")
+
+        # Call the dedicated function with the clean content
         score=$(compute_and_cache_score "$id" "$content")
 
         # Now format the line, just like awk did for the fast path
@@ -271,7 +277,8 @@ build_menu() {
           "${AUTHOR_CLR}" "${score}" "${RESET}"
       else
         # The line is already perfectly formatted by awk. We just pass it through.
-        printf '%s\t%s\t%s\t%s\t%s\n' "$type" "$col1" "$col2" "$col3" "$col5"
+        # Note the change from $col5 to $col4 in the last field.
+        printf '%s\t%s\t%s\t%s\t%s\n' "$type" "$col1" "$col2" "$col3" "$col4"
       fi
     done
   } | sort -r -n -k1,1
@@ -298,8 +305,7 @@ open_and_mark() {
 
 append_feedback() {
   idx=$1 file=$2
-  jq -r ".[$idx].content" "$CACHE_FILE" >>"$file"
-  printf '\n' >>"$file"
+  printf '%s\n' "$(jq -r ".[$idx].content" "$CACHE_FILE")" >>"$file"
 
   # The feedback files have changed, so all scores are now invalid.
   # Remove the cache directory so scores will be recalculated next time.
@@ -345,33 +351,39 @@ case ${1:-show} in
 update) update_feeds ;;
 __view)
   shift
-  open_and_mark "$1"
+  jq_index=$(($1 - 1))
+  open_and_mark "$jq_index"
   ;;
 __like)
   shift
-  append_feedback "$1" "$LIKED_FILE"
+  jq_index=$(($1 - 1))
+  append_feedback "$jq_index" "$LIKED_FILE"
   ;;
 __dislike)
   shift
-  append_feedback "$1" "$DISLIKED_FILE"
+  jq_index=$(($1 - 1))
+  append_feedback "$jq_index" "$DISLIKED_FILE"
   ;;
 __menu) build_menu ;;
 __markread)
   shift
-  id=$(jq -r ".[$1].id" "$CACHE_FILE")
+  jq_index=$(($1 - 1))
+  id=$(jq -r ".[$jq_index].id" "$CACHE_FILE")
   mark_read "$id"
   commit_if_changed
   ;;
 __unread)
   shift
-  id=$(jq -r ".[$1].id" "$CACHE_FILE")
+  jq_index=$(($1 - 1))
+  id=$(jq -r ".[$jq_index].id" "$CACHE_FILE")
   unmark_read "$id"
   commit_if_changed
   ;;
 __toggle) toggle_show ;; # no commit; purely a view flag
 __copy)
   shift
-  copy_url "$1"
+  jq_index=$(($1 - 1))
+  copy_url "$jq_index"
   ;;
 show | *) fzf_loop ;;
 esac

@@ -5,9 +5,13 @@ XDG_CACHE_HOME=${XDG_CACHE_HOME:-"$HOME/.local/share"}
 XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-"$HOME/.config"}
 CACHE_DIR=${CACHE_DIR:-"$XDG_CACHE_HOME/read"}
 CACHE_FILE="$CACHE_DIR/contents.json"
+SCORE_CACHE_DIR="$CACHE_DIR/scores"
 
 READ_FILE="$CACHE_DIR/read.txt"
 SHOW_FLAG="$CACHE_DIR/show_read.flag" # its existence means "show all"
+
+mkdir -p "$CACHE_DIR" "$SCORE_CACHE_DIR"
+touch "$READ_FILE"
 
 is_read() { grep -Fxq "$1" "$READ_FILE" 2>/dev/null; }
 mark_read() { is_read "$1" || printf '%s\n' "$1" >>"$READ_FILE"; }
@@ -31,6 +35,8 @@ SHELL="sh"
 
 LIKED_FILE="$CACHE_DIR/liked.txt"
 DISLIKED_FILE="$CACHE_DIR/disliked.txt"
+# CACHE: Ensure feedback files exist
+touch "$LIKED_FILE" "$DISLIKED_FILE"
 
 URLS=${URLS:-$XDG_CONFIG_HOME/read/feeds} # file containing feed URLs, one per line
 JOBS=${JOBS:-64}                          # maximum concurrent feed workers
@@ -145,15 +151,28 @@ update_feeds() {
   commit_if_changed
 }
 
-# score_one idx text
+# CACHE: Rewritten score_one function to use a file-based cache.
+# It now takes the stable article 'id' instead of a transient 'idx'.
+# score_one id text
 score_one() {
-  idx=$1
+  id=$1
   text=$2
 
+  # Sanitize ID to be a safe filename. Replace any non-alnum characters with _.
+  # POSIX `tr` is used for portability.
+  safe_id=$(printf '%s' "$id" | tr -c 'a-zA-Z0-9._-' '_')
+  cache_path="$SCORE_CACHE_DIR/$safe_id"
+
+  # If a cached score file exists, print its content and we're done.
+  if [ -f "$cache_path" ]; then
+    cat "$cache_path"
+    return
+  fi
+
+  # --- If not cached, compute the score ---
   like=0
   dis=0
 
-  # Create a secure temporary file for the article text
   tmp=$(mktemp -t read_score.XXXXXX) || {
     printf >&2 'mktemp failed\n'
     return 1
@@ -169,8 +188,9 @@ score_one() {
 
   rm -f -- "$tmp" # always clean up
 
-  # like − dislike
-  awk -v a="$like" -v b="$dis" 'BEGIN{printf "%.3f", a-b}'
+  # Compute, save to cache, and print the score in one step.
+  # `tee` writes the output of `awk` to the cache file and also to stdout.
+  awk -v a="$like" -v b="$dis" 'BEGIN{printf "%.3f", a-b}' | tee "$cache_path"
 }
 
 build_menu() {
@@ -192,7 +212,8 @@ build_menu() {
     while IFS= read -r line; do
       id=$(printf '%s\n' "$line" | jq -r '.id')
       if [ "$read_vis" -eq 0 ] && is_read "$id"; then
-        continue # hide read articles
+        idx=$((idx + 1)) #Still need to increment index for correct reference
+        continue         # hide read articles
       fi
       # Extract the bits we need from the current JSON object
       title=$(printf '%s\n' "$line" | jq -r '.title')
@@ -201,7 +222,9 @@ build_menu() {
         jq -r '(.author | select(length>0)) // .source_title // empty')
       content=$(printf '%s\n' "$line" | jq -r '.content')
 
-      score=$(score_one "$idx" "$content")
+      # CACHE: Call score_one with the stable 'id' instead of 'idx'.
+      score=$(score_one "$id" "$content")
+
       printf '%s\t%s\t%s\t%s\t%s\n' \
         "$score" "$idx" "${TITLE_CLR}${title}${RESET}" \
         "${AUTHOR_CLR} – ${author}${RESET}" \
@@ -234,6 +257,13 @@ append_feedback() {
   idx=$1 file=$2
   jq -r ".[$idx].content" "$CACHE_FILE" >>"$file"
   printf '\n' >>"$file"
+
+  # The feedback files have changed, so all scores are now invalid.
+  # Remove the cache directory so scores will be recalculated next time.
+  log "Invalidating score cache..."
+  rm -rf "$SCORE_CACHE_DIR"
+  mkdir -p "$SCORE_CACHE_DIR"
+
   commit_if_changed
 }
 
@@ -245,6 +275,8 @@ copy_url() { # copy_url <idx>
 }
 
 fzf_loop() {
+  # CACHE: Pass SCORE_CACHE_DIR into the fzf environment
+  export SCORE_CACHE_DIR
   build_menu |
     fzf --ansi \
       --multi \

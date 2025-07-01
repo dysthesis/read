@@ -118,7 +118,8 @@ update_feeds() {
             continue
           }
 
-          tmp_body=$(mktemp) || {
+          mkdir -p "$tmp/bodies"
+          tmp_body=$(mktemp "$tmp/bodies/body.XXXXXX") || {
             log "mktemp failed"
             continue
           }
@@ -149,48 +150,6 @@ update_feeds() {
 
   log "[+] Written merged array to $CACHE_FILE"
   commit_if_changed
-}
-
-# CACHE: Rewritten score_one function to use a file-based cache.
-# It now takes the stable article 'id' instead of a transient 'idx'.
-# score_one id text
-score_one() {
-  id=$1
-  text=$2
-
-  # Sanitize ID to be a safe filename. Replace any non-alnum characters with _.
-  # POSIX `tr` is used for portability.
-  safe_id=$(printf '%s' "$id" | tr -c 'a-zA-Z0-9._-' '_')
-  cache_path="$SCORE_CACHE_DIR/$safe_id"
-
-  # If a cached score file exists, print its content and we're done.
-  if [ -f "$cache_path" ]; then
-    cat "$cache_path"
-    return
-  fi
-
-  # --- If not cached, compute the score ---
-  like=0
-  dis=0
-
-  tmp=$(mktemp -t read_score.XXXXXX) || {
-    printf >&2 'mktemp failed\n'
-    return 1
-  }
-  printf '%s' "$text" >"$tmp"
-
-  if [ -s "$LIKED_FILE" ]; then
-    like=$(sim "$tmp" "$LIKED_FILE" | awk '{print $NF+0}')
-  fi
-  if [ -s "$DISLIKED_FILE" ]; then
-    dis=$(sim "$tmp" "$DISLIKED_FILE" | awk '{print $NF+0}')
-  fi
-
-  rm -f -- "$tmp" # always clean up
-
-  # Compute, save to cache, and print the score in one step.
-  # `tee` writes the output of `awk` to the cache file and also to stdout.
-  awk -v a="$like" -v b="$dis" 'BEGIN{printf "%.3f", a-b}' | tee "$cache_path"
 }
 
 compute_and_cache_score() {

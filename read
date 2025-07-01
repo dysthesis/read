@@ -195,7 +195,6 @@ score_one() {
 
 build_menu() {
   idx=0
-
   colors=$(tput colors 2>/dev/null || printf %s 0)
   if [ "$colors" -ge 256 ]; then
     AUTHOR_CLR=$(tput setaf 244)
@@ -208,21 +207,28 @@ build_menu() {
   RESET=$(tput sgr0)
   read_vis=$([ -e "$SHOW_FLAG" ] && echo 1 || echo 0)
 
-  jq -c '.[]' "$CACHE_FILE" |
-    while IFS= read -r line; do
-      id=$(printf '%s\n' "$line" | jq -r '.id')
-      if [ "$read_vis" -eq 0 ] && is_read "$id"; then
-        idx=$((idx + 1)) #Still need to increment index for correct reference
-        continue         # hide read articles
-      fi
-      # Extract the bits we need from the current JSON object
-      title=$(printf '%s\n' "$line" | jq -r '.title')
-      url=$(printf '%s\n' "$line" | jq -r '.url')
-      author=$(printf '%s\n' "$line" |
-        jq -r '(.author | select(length>0)) // .source_title // empty')
-      content=$(printf '%s\n' "$line" | jq -r '.content')
+  jq -r '.[] | [.id, .title, .author // .source_title, .content] | @tsv' "$CACHE_FILE" |
+    awk -F'\t' -v read_vis="$read_vis" '
+    BEGIN {
+      while ((getline line < ARGV[1]) > 0) {
+        read_ids[line] = 1
+      }
+      close(ARGV[1]) # Close the file
+      ARGV[1] = ""
+    }
 
-      # CACHE: Call score_one with the stable 'id' instead of 'idx'.
+    {
+      id = $1
+      # If we are hiding read articles (read_vis=0) AND the id is in our array, skip.
+      if (read_vis == 0 && id in read_ids) {
+        next
+      }
+      # Print the fields, preserving tabs for the shell `read` command.
+      # $1=id, $2=title, $3=author, $4=content
+      printf "%s\t%s\t%s\t%s\n", $1, $2, $3, $4
+    }
+  ' "$READ_FILE" |
+    while IFS=$(printf '\t') read -r id title author content; do
       score=$(score_one "$id" "$content")
 
       printf '%s\t%s\t%s\t%s\t%s\n' \
@@ -231,7 +237,7 @@ build_menu() {
         "${AUTHOR_CLR}${score}${RESET}"
 
       idx=$((idx + 1))
-    done | sort -r -n -k1,1 # highest score first
+    done | sort -r -n -k1,1
 }
 
 preview_cmd() {

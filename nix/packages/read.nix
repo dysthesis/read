@@ -10,7 +10,7 @@
   ...
 }:
 writeShellApplication {
-  name = "rd_new";
+  name = "rd";
   text = builtins.readFile ../../read;
   runtimeInputs = [
     sim

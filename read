@@ -193,51 +193,129 @@ score_one() {
   awk -v a="$like" -v b="$dis" 'BEGIN{printf "%.3f", a-b}' | tee "$cache_path"
 }
 
-build_menu() {
-  idx=0
-  colors=$(tput colors 2>/dev/null || printf %s 0)
-  if [ "$colors" -ge 256 ]; then
-    AUTHOR_CLR=$(tput setaf 244)
-  elif [ "$colors" -ge 16 ]; then
-    AUTHOR_CLR=$(tput setaf 8)
-  else
-    AUTHOR_CLR=$(tput dim)
+compute_and_cache_score() {
+  id=$1
+  text=$2
+  safe_id=$(printf '%s' "$id" | tr -c 'a-zA-Z0-9._-' '_')
+  cache_path="$SCORE_CACHE_DIR/$safe_id"
+
+  like=0
+  dis=0
+
+  tmp=$(mktemp -t read_score.XXXXXX) || {
+    printf >&2 'mktemp failed\n'
+    return 1
+  }
+  printf '%s' "$text" >"$tmp"
+
+  if [ -s "$LIKED_FILE" ]; then
+    like=$(sim "$tmp" "$LIKED_FILE" | awk '{print $NF+0}')
   fi
-  TITLE_CLR=$(tput bold)
-  RESET=$(tput sgr0)
+  if [ -s "$DISLIKED_FILE" ]; then
+    dis=$(sim "$tmp" "$DISLIKED_FILE" | awk '{print $NF+0}')
+  fi
+
+  rm -f -- "$tmp"
+
+  awk -v a="$like" -v b="$dis" 'BEGIN{printf "%.3f", a-b}' | tee "$cache_path"
+}
+
+build_menu() {
+  if [ -z "${AUTHOR_CLR-}" ]; then
+    colors=$(tput colors 2>/dev/null || printf %s 0)
+    if [ "$colors" -ge 256 ]; then
+      AUTHOR_CLR=$(tput setaf 244)
+    elif [ "$colors" -ge 16 ]; then
+      AUTHOR_CLR=$(tput setaf 8)
+    else
+      AUTHOR_CLR=$(tput dim)
+    fi
+    TITLE_CLR=$(tput bold)
+    RESET=$(tput sgr0)
+  fi
+
   read_vis=$([ -e "$SHOW_FLAG" ] && echo 1 || echo 0)
+  idx=0
 
-  jq -r '.[] | [.id, .title, .author // .source_title, .content] | @tsv' "$CACHE_FILE" |
-    awk -F'\t' -v read_vis="$read_vis" '
-    BEGIN {
-      while ((getline line < ARGV[1]) > 0) {
-        read_ids[line] = 1
+  {
+    jq -r '.[] | [.id, .title, (if .author != null and .author != "" then .author else if .source_title != null and .source_title != "" then .source_title else "Unknown" end end), .content] | @tsv' "$CACHE_FILE" |
+      awk -F'\t' \
+        -v read_vis="$read_vis" \
+        -v cache_dir="$SCORE_CACHE_DIR" \
+        -v title_clr="$TITLE_CLR" \
+        -v author_clr="$AUTHOR_CLR" \
+        -v reset_clr="$RESET" \
+        '
+      # Block 1: Runs once. Loads read IDs into memory.
+      BEGIN {
+        while ((getline line < ARGV[1]) > 0) read_ids[line] = 1
+        close(ARGV[1])
+        ARGV[1] = ""
       }
-      close(ARGV[1]) # Close the file
-      ARGV[1] = ""
-    }
 
-    {
-      id = $1
-      # If we are hiding read articles (read_vis=0) AND the id is in our array, skip.
-      if (read_vis == 0 && id in read_ids) {
-        next
+      # Block 2: Runs for every article.
+      {
+        id = $1; title = $2; author = $3; content = $4
+
+        # Filter out read articles if necessary
+        if (read_vis == 0 && id in read_ids) next
+
+        # Sanitize ID and build cache path INSIDE AWK
+        safe_id = id
+        gsub(/[^a-zA-Z0-9._-]/, "_", safe_id)
+        cache_path = cache_dir "/" safe_id
+
+        score = "UNCACHED" # Default score status
+        # Try to read the score from the cache.
+        # If getline succeeds, it returns 1 and sets `cached_score`.
+        if ((getline cached_score < cache_path) > 0) {
+          score = cached_score
+          close(cache_path)
+        }
+
+        # If score is cached, print the fully formatted fzf line and continue.
+        # This is the FAST PATH. No shell interaction needed.
+        if (score != "UNCACHED") {
+          printf "%s\t%s\t%s%s%s\t%s – %s%s\t%s%s%s\n",
+            score, NR, title_clr, title, reset_clr,
+            author_clr, author, reset_clr,
+            author_clr, score, reset_clr
+          next
+        }
+
+        # If we reach here, it is a CACHE MISS.
+        # Print a special format for the shell to process.
+        # We prefix with "SLOWPATH" to make it easy to filter.
+        printf "SLOWPATH\t%s\t%s\t%s\t%s\t%s\n",
+          id, title, author, content, NR
       }
-      # Print the fields, preserving tabs for the shell `read` command.
-      # $1=id, $2=title, $3=author, $4=content
-      printf "%s\t%s\t%s\t%s\n", $1, $2, $3, $4
-    }
-  ' "$READ_FILE" |
-    while IFS=$(printf '\t') read -r id title author content; do
-      score=$(score_one "$id" "$content")
+    ' "$READ_FILE" # awk reads read.txt here
+  } | {
+    # This block processes the combined output. It receives fully-formatted lines (fast path) and
+    # SLOWPATH lines.
+    while IFS=$(printf '\t') read -r type col1 col2 col3 col4 col5; do
+      if [ "$type" = "SLOWPATH" ]; then
+        # A score needs to be computed
+        id=$col1
+        title=$col2
+        author=$col3
+        content=$col4
+        line_num=$col5
 
-      printf '%s\t%s\t%s\t%s\t%s\n' \
-        "$score" "$idx" "${TITLE_CLR}${title}${RESET}" \
-        "${AUTHOR_CLR} – ${author}${RESET}" \
-        "${AUTHOR_CLR}${score}${RESET}"
+        # Call the dedicated function to do the expensive work
+        score=$(compute_and_cache_score "$id" "$content")
 
-      idx=$((idx + 1))
-    done | sort -r -n -k1,1
+        # Now format the line, just like awk did for the fast path
+        printf '%s\t%s\t%s%s%s\t%s – %s%s\t%s%s%s\n' \
+          "$score" "$line_num" "${TITLE_CLR}" "${title}" "${RESET}" \
+          "${AUTHOR_CLR}" " ${author}" "${RESET}" \
+          "${AUTHOR_CLR}" "${score}" "${RESET}"
+      else
+        # The line is already perfectly formatted by awk. We just pass it through.
+        printf '%s\t%s\t%s\t%s\t%s\n' "$type" "$col1" "$col2" "$col3" "$col5"
+      fi
+    done
+  } | sort -r -n -k1,1
 }
 
 preview_cmd() {

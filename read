@@ -109,34 +109,57 @@ update_feeds() {
         exit 0
       fi
 
-      printf '%s\n' "$json" |
+      # Parallel article processing starts here
+      feed_tmp_dir=$(mktemp -d -p "$tmp")
+      article_sem=$(mktemp -u)
+      mkfifo "$article_sem"
+      exec 5<>"$article_sem"
+      rm "$article_sem"
+
+      ARTICLE_JOBS=${ARTICLE_JOBS:-16}
+      k=0
+      while [ "$k" -lt "$ARTICLE_JOBS" ]; do
+        printf '\n' >&5
+        k=$((k + 1))
+      done
+
+      article_idx=0
+      printf '%s' "$json" |
         jq -c '.[]' | # stream objects, one per line
         while IFS= read -r art; do
-          url=$(printf '%s\n' "$art" | jq -r '.url // empty')
-          [ -z "$url" ] && {
-            printf '%s\n' "$art"
-            continue
-          }
+          # Wait for a free article processing slot
+          IFS= read -r _ <&5
 
-          mkdir -p "$tmp/bodies"
-          tmp_body=$(mktemp "$tmp/bodies/body.XXXXXX") || {
-            log "mktemp failed"
-            continue
-          }
+          {
+            url=$(printf '%s\n' "$art" | jq -r '.url // empty')
+            if [ -z "$url" ]; then
+              printf '%s\n' "$art"
+            else
+              # Each article gets its own temp file for the body
+              body_tmp_file=$(mktemp -p "$feed_tmp_dir")
+              if clean --markdown "$url" 2>>"$CACHE_DIR/clean.err" >"$body_tmp_file"; then
+                printf '%s\n' "$art" | jq --rawfile body "$body_tmp_file" '.content = $body'
+              else
+                log "[#${i}] body skipped – clean failed for $url"
+                printf '%s\n' "$art"
+              fi
+              rm -f -- "$body_tmp_file"
+            fi
+            # Return the token
+            printf '\n' >&5
+          } >"$feed_tmp_dir/$article_idx.json" &
+          article_idx=$((article_idx + 1))
+        done
 
-          # 1.  Produce Markdown → file (with safety belt)
-          if clean --markdown "$url" 2>>"$CACHE_DIR/clean.err" >"$tmp_body"; then
-            # 2.  Merge without huge argv / without python
-            printf '%s\n' "$art" |
-              jq --rawfile body "$tmp_body" '.content = $body'
-          else
-            log "[#${i}] body skipped – clean failed for $url"
-            printf '%s\n' "$art"
-          fi
+      wait # for all articles in the current feed
 
-          rm -f -- "$tmp_body"
-        done |
-        jq -s '.' >"$tmp/$i.json" # re-assemble array
+      exec 5>&- # close article semaphore FD
+
+      # Re-assemble the JSON array for the feed
+      find "$feed_tmp_dir" -name '*.json' -print0 |
+        xargs -0 cat | jq -s '.' >"$tmp/$i.json"
+
+      rm -rf "$feed_tmp_dir"
 
       printf '\n' >&4 # return token
     } &
@@ -262,6 +285,7 @@ build_menu() {
         author=$col3
         line_num=$col4 # This is NR from awk
 
+        # BOTTLENECK FIXED: No need to call jq, content is passed from awk.
         # The original content was passed from `jq` as a TSV field, so it's
         # already a single line with escaped characters. `compute_and_cache_score`
         # handles this correctly with `printf '%s\n'`.
